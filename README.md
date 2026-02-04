@@ -46,7 +46,7 @@ Polis consists of several services:
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/yourusername/polis.git
+git clone https://github.com/jakehudson11/polis.git
 cd polis
 ```
 
@@ -195,6 +195,14 @@ Polis is designed to be a standalone platform that can be consumed by proprietar
 For details on how Agora integrates with Polis while maintaining separation, see:
 - [Agora Separation Rules](../agora/.cursor/rules/polis-agora-separation.md) (if Agora repo is adjacent)
 - [User Sync API](docs/USER-SYNC-API.md) - How external systems can sync users with Polis
+
+## Releases & Versioning
+
+Polis and Agora use synchronized versioning for paired releases.
+
+- **Current Version**: See [VERSION](VERSION) file
+- **Release Process**: See [RELEASING.md](RELEASING.md)
+- **Rollback Guide**: See [RELEASING.md](RELEASING.md#rolling-back-to-a-previous-version)
 
 ## License
 
