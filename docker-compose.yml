@@ -1,0 +1,245 @@
+# Polis Standalone - Docker Compose Configuration
+# 
+# This configuration runs all Polis services:
+# - Polis API Server
+# - Math Service (Clojure clustering)
+# - Delphi Service (Python AI analysis)
+# - PostgreSQL Database
+# - Client Applications
+
+version: '3.8'
+
+services:
+  # Core Polis API Server
+  polis-api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      args:
+        NODE_ENV: production
+    image: polis/server:latest
+    container_name: polis-api
+    restart: unless-stopped
+    environment:
+      # Database
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_SSL=${DATABASE_SSL:-false}
+      
+      # JWT Configuration
+      - POLIS_JWT_SECRET=${POLIS_JWT_SECRET}
+      - POLIS_JWT_ISSUER=${POLIS_JWT_ISSUER:-https://pol.is/}
+      - POLIS_JWT_AUDIENCE=${POLIS_JWT_AUDIENCE:-participants}
+      - POLIS_INTERNAL_PROXY_SECRET=${POLIS_INTERNAL_PROXY_SECRET}
+      
+      # AI Services (Optional)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      
+      # Internal Service URLs
+      - MATH_SERVICE_URL=http://polis-math:8080
+      - DELPHI_SERVICE_URL=http://polis-delphi:8000
+      
+      # Server Configuration
+      - API_SERVER_PORT=${API_SERVER_PORT:-5000}
+      - DEV_MODE=${DEV_MODE:-false}
+      - NODE_ENV=${NODE_ENV:-production}
+      
+      # Email (Optional)
+      - EMAIL_TRANSPORT_TYPES=${EMAIL_TRANSPORT_TYPES}
+      - POLIS_FROM_ADDRESS=${POLIS_FROM_ADDRESS}
+      - MAILGUN_API_KEY=${MAILGUN_API_KEY}
+      - MAILGUN_DOMAIN=${MAILGUN_DOMAIN}
+      
+      # Static Files
+      - STATIC_FILES_HOST=${STATIC_FILES_HOST}
+      - STATIC_FILES_PORT=${STATIC_FILES_PORT:-8080}
+    ports:
+      - "${API_SERVER_PORT:-5000}:5000"
+    networks:
+      - polis-net
+    depends_on:
+      - polis-postgres
+    volumes:
+      - polis-server-logs:/app/logs
+
+  # Math Service (Clojure - PCA Clustering)
+  polis-math:
+    build:
+      context: ./math
+      dockerfile: Dockerfile
+    image: polis/math:latest
+    container_name: polis-math
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - LOGGING_LEVEL=${MATH_LOG_LEVEL:-warn}
+      - MATH_ENV=${MATH_ENV:-prod}
+      - WEBSERVER_USERNAME=${WEBSERVER_USERNAME}
+      - WEBSERVER_PASS=${WEBSERVER_PASS}
+      - DATABASE_POOL_SIZE=${MATH_DATABASE_POOL_SIZE:-10}
+    networks:
+      - polis-net
+    depends_on:
+      - polis-postgres
+
+  # Delphi Service (Python - AI Analysis)
+  polis-delphi:
+    build:
+      context: ./delphi
+      dockerfile: Dockerfile
+    image: polis/delphi:latest
+    container_name: polis-delphi
+    restart: unless-stopped
+    environment:
+      # Database
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_HOST=${POSTGRES_HOST}
+      - DATABASE_PORT=${POSTGRES_PORT}
+      - DATABASE_NAME=${POSTGRES_DB}
+      - DATABASE_USER=${POSTGRES_USER}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD}
+      - DATABASE_SSL_MODE=${DATABASE_SSL_MODE:-disable}
+      
+      # AI Services
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
+      - OLLAMA_HOST=${OLLAMA_HOST}
+      - OLLAMA_MODEL=${OLLAMA_MODEL}
+      
+      # DynamoDB (Optional - for job queue)
+      - DYNAMODB_ENDPOINT=${DYNAMODB_ENDPOINT}
+      
+      # S3 Storage (Optional - for visualizations)
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_S3_ENDPOINT=${AWS_S3_ENDPOINT}
+      - AWS_S3_BUCKET_NAME=${AWS_S3_BUCKET_NAME}
+      
+      # Delphi Configuration
+      - LOG_LEVEL=${DELPHI_LOG_LEVEL:-INFO}
+      - DELPHI_DEV_OR_PROD=${DELPHI_DEV_OR_PROD:-prod}
+      - POLL_INTERVAL=${POLL_INTERVAL:-2}
+      - INSTANCE_SIZE=${INSTANCE_SIZE:-default}
+    networks:
+      - polis-net
+    depends_on:
+      - polis-postgres
+    deploy:
+      resources:
+        limits:
+          memory: ${DELPHI_CONTAINER_MEMORY:-16g}
+          cpus: ${DELPHI_CONTAINER_CPUS:-2}
+
+  # PostgreSQL Database
+  polis-postgres:
+    image: postgres:16
+    container_name: polis-postgres
+    restart: always
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-polis}
+      - POSTGRES_USER=${POSTGRES_USER:-polis}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - polis-net
+    volumes:
+      - polis-postgres-data:/var/lib/postgresql/data
+
+  # Client: Admin Dashboard
+  client-admin:
+    build:
+      context: ./client-admin
+      dockerfile: Dockerfile
+    image: polis/client-admin:latest
+    container_name: polis-client-admin
+    restart: unless-stopped
+    environment:
+      - API_SERVER_URL=${API_SERVER_URL:-http://polis-api:5000}
+    ports:
+      - "8080:8080"
+    profiles:
+      - clients
+    networks:
+      - polis-net
+    depends_on:
+      - polis-api
+
+  # Client: Participation Interface
+  client-participation:
+    build:
+      context: ./client-participation
+      dockerfile: Dockerfile
+    image: polis/client-participation:latest
+    container_name: polis-client-participation
+    restart: unless-stopped
+    environment:
+      - API_SERVER_URL=${API_SERVER_URL:-http://polis-api:5000}
+    ports:
+      - "8081:8080"
+    profiles:
+      - clients
+    networks:
+      - polis-net
+    depends_on:
+      - polis-api
+
+  # Client: Next-Gen Participation (Alpha)
+  client-participation-alpha:
+    build:
+      context: ./client-participation-alpha
+      dockerfile: Dockerfile
+      args:
+        - PUBLIC_SERVICE_URL=${PUBLIC_SERVICE_URL}
+        - PUBLIC_AUTH_NAMESPACE=${AUTH_NAMESPACE}
+        - OIDC_CACHE_KEY_PREFIX=${OIDC_CACHE_KEY_PREFIX}
+        - OIDC_CACHE_KEY_ID_TOKEN_SUFFIX=${OIDC_CACHE_KEY_ID_TOKEN_SUFFIX}
+    image: polis/client-participation-alpha:latest
+    container_name: polis-client-participation-alpha
+    restart: unless-stopped
+    environment:
+      - PUBLIC_SERVICE_URL=${PUBLIC_SERVICE_URL}
+      - PUBLIC_AUTH_NAMESPACE=${AUTH_NAMESPACE}
+      - INTERNAL_SERVICE_URL=http://polis-api:5000
+      - PUBLIC_OIDC_CACHE_KEY_PREFIX=${OIDC_CACHE_KEY_PREFIX}
+      - PUBLIC_OIDC_CACHE_KEY_ID_TOKEN_SUFFIX=${OIDC_CACHE_KEY_ID_TOKEN_SUFFIX}
+    ports:
+      - "4321:4321"
+    profiles:
+      - clients
+    networks:
+      - polis-net
+    depends_on:
+      - polis-api
+
+  # Client: Report Generation
+  client-report:
+    build:
+      context: ./client-report
+      dockerfile: Dockerfile
+    image: polis/client-report:latest
+    container_name: polis-client-report
+    restart: unless-stopped
+    environment:
+      - API_SERVER_URL=${API_SERVER_URL:-http://polis-api:5000}
+    ports:
+      - "8082:8080"
+    profiles:
+      - clients
+    networks:
+      - polis-net
+    depends_on:
+      - polis-api
+
+networks:
+  polis-net:
+    driver: bridge
+
+volumes:
+  polis-postgres-data:
+    labels:
+      polis-component: database
+  polis-server-logs:
+    labels:
+      polis-component: server
