@@ -94,7 +94,7 @@ The final output must contain a deliberate 50:50 balance between comments that r
 
 ${context}`;
 
-      const model = process.env.OPENAI_MODEL || "gpt-4o";
+      const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
       const response = await this.openai.chat.completions.create({
         model,

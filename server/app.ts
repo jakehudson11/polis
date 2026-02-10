@@ -108,6 +108,18 @@ import {
   handle_GET_research_dossier_pdf,
 } from "./src/routes/researchDossier";
 import {
+  handle_POST_create_invitation,
+  handle_PATCH_conversation_settings,
+  handle_POST_join_conversation,
+  handle_GET_join_requests,
+  handle_POST_review_join_request,
+  handle_GET_user_conversations,
+  handle_GET_my_conversation_status,
+} from "./src/routes/invitations";
+import {
+  ensureConversationOwner,
+} from "./src/middleware/permissions";
+import {
   handle_DELETE_metadata_answers,
   handle_DELETE_metadata_questions,
   handle_GET_metadata_answers,
@@ -1393,14 +1405,69 @@ helpersInitialized.then(
       want("send_created_email", getBool, assignToP),
       want("context", getOptionalStringLimitLength(100000), assignToP),
       want("internal_information", getOptionalStringLimitLength(100000), assignToP, ""),
-      want("internal_information_submitted", getBool, assignToP, false),
-      want("seed_comments_submitted", getBool, assignToP, false),
+      want("internal_information_submitted", getBool, assignToP),
+      want("seed_comments_submitted", getBool, assignToP),
       want("link_url", getStringLimitLength(1, 9999), assignToP),
       want("subscribe_type", getInt, assignToP),
       want("treevite_enabled", getBool, assignToP, false),
       want("use_xid_whitelist", getBool, assignToP),
       want("xid_required", getBool, assignToP),
       handle_PUT_conversations
+    );
+
+    // Invitation and Join Request Routes
+    app.post(
+      "/api/v3/conversations/:conversation_id/invitations",
+      hybridAuth(assignToP),
+      need("conversation_id", getConversationIdFetchZid, assignToPCustom("zid")),
+      ensureConversationOwner(),
+      handle_POST_create_invitation
+    );
+
+    app.patch(
+      "/api/v3/conversations/:conversation_id/settings",
+      moveToBody,
+      hybridAuth(assignToP),
+      need("conversation_id", getConversationIdFetchZid, assignToPCustom("zid")),
+      ensureConversationOwner(),
+      handle_PATCH_conversation_settings
+    );
+
+    app.post(
+      "/api/v3/conversations/:conversation_id/join",
+      hybridAuth(assignToP),
+      need("conversation_id", getConversationIdFetchZid, assignToPCustom("zid")),
+      handle_POST_join_conversation
+    );
+
+    app.get(
+      "/api/v3/conversations/:conversation_id/join-requests",
+      hybridAuth(assignToP),
+      need("conversation_id", getConversationIdFetchZid, assignToPCustom("zid")),
+      ensureConversationOwner(),
+      handle_GET_join_requests
+    );
+
+    app.post(
+      "/api/v3/conversations/:conversation_id/join-requests/:request_id/review",
+      moveToBody,
+      hybridAuth(assignToP),
+      need("conversation_id", getConversationIdFetchZid, assignToPCustom("zid")),
+      ensureConversationOwner(),
+      handle_POST_review_join_request
+    );
+
+    app.get(
+      "/api/v3/users/me/conversations",
+      hybridAuth(assignToP),
+      handle_GET_user_conversations
+    );
+
+    app.get(
+      "/api/v3/conversations/:conversation_id/my-status",
+      hybridAuth(assignToP),
+      need("conversation_id", getConversationIdFetchZid, assignToPCustom("zid")),
+      handle_GET_my_conversation_status
     );
 
     // Research Dossier Routes

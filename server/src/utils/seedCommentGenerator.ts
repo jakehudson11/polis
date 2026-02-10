@@ -29,7 +29,7 @@ export async function generateSeedComments(
     });
 
     const response = await openai.chat.completions.create({
-      model: "gpt-4-turbo-preview",
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },

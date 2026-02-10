@@ -962,28 +962,31 @@ function handle_PUT_conversations(
         fields.context = req.p.context ?? "";
       }
 
-      // Handle internal information fields
+      // Internal information feature has been moved to Agora
+      // Polis no longer accepts or processes internal_information fields
+      // Log a warning if clients still try to send them
       const hasInternalInfoField =
         (req as any).body && Object.prototype.hasOwnProperty.call((req as any).body, "internal_information");
-      logger.info("🔍 Checking internal_information field", {
-        hasInternalInfoField,
-        bodyKeys: (req as any).body ? Object.keys((req as any).body) : [],
-        internal_information_value: req.p.internal_information,
-        internal_information_length: req.p.internal_information ? req.p.internal_information.length : 0
-      });
       if (hasInternalInfoField) {
-        fields.internal_information = req.p.internal_information ?? "";
-        logger.info("✅ Setting internal_information in fields", {
-          value: fields.internal_information ? fields.internal_information.substring(0, 50) + '...' : 'empty',
-          length: fields.internal_information?.length
+        logger.warn("⚠️  Internal information fields sent to Polis are ignored. Feature moved to Agora.", {
+          hasInternalInfoField,
+          bodyKeys: (req as any).body ? Object.keys((req as any).body) : [],
         });
       }
-
-      if (!_.isUndefined(req.p.internal_information_submitted)) {
-        fields.internal_information_submitted = !!req.p.internal_information_submitted;
+      
+      const hasInternalInfoSubmittedField =
+        (req as any).body && Object.prototype.hasOwnProperty.call((req as any).body, "internal_information_submitted");
+      if (hasInternalInfoSubmittedField) {
+        logger.warn("⚠️  Internal information submitted field sent to Polis is ignored. Feature moved to Agora.");
       }
+      
+      // DO NOT set fields.internal_information or fields.internal_information_submitted
+      // These fields are deprecated in Polis and managed by Agora
 
-      if (!_.isUndefined(req.p.seed_comments_submitted)) {
+      // Only update seed_comments_submitted if explicitly sent in request body
+      const hasSeedCommentsSubmittedField =
+        (req as any).body && Object.prototype.hasOwnProperty.call((req as any).body, "seed_comments_submitted");
+      if (hasSeedCommentsSubmittedField && !_.isUndefined(req.p.seed_comments_submitted)) {
         fields.seed_comments_submitted = !!req.p.seed_comments_submitted;
       }
 

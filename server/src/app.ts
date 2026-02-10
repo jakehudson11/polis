@@ -118,11 +118,12 @@ import {
   handle_POST_reserve_conversation_id,
   handle_PUT_conversations,
 } from "./src/routes/conversations";
-import {
-  handle_GET_research_dossier,
-  handle_POST_regenerate_research_dossier,
-  handle_GET_research_dossier_pdf,
-} from "./routes/researchDossier";
+// Research dossier feature has been moved to Agora
+// import {
+//   handle_GET_research_dossier,
+//   handle_POST_regenerate_research_dossier,
+//   handle_GET_research_dossier_pdf,
+// } from "./routes/researchDossier";
 import {
   handle_DELETE_metadata_answers,
   handle_DELETE_metadata_questions,
@@ -1473,42 +1474,11 @@ helpersInitialized.then(
       handle_PUT_conversations
     );
 
-    // Research Dossier Routes
-    app.get(
-      "/api/v3/conversations/:conversation_id/research-dossier",
-      moveToBody,
-      hybridAuth(assignToP),
-      need(
-        "conversation_id",
-        getConversationIdFetchZid,
-        assignToPCustom("zid")
-      ),
-      handle_GET_research_dossier
-    );
-
-    app.post(
-      "/api/v3/conversations/:conversation_id/research-dossier/regenerate",
-      moveToBody,
-      hybridAuth(assignToP),
-      need(
-        "conversation_id",
-        getConversationIdFetchZid,
-        assignToPCustom("zid")
-      ),
-      handle_POST_regenerate_research_dossier
-    );
-
-    app.get(
-      "/api/v3/conversations/:conversation_id/research-dossier/pdf",
-      moveToBody,
-      hybridAuth(assignToP),
-      need(
-        "conversation_id",
-        getConversationIdFetchZid,
-        assignToPCustom("zid")
-      ),
-      handle_GET_research_dossier_pdf
-    );
+    // Research Dossier Routes - REMOVED (feature moved to Agora)
+    // These endpoints are now served by Agora backend instead of Polis
+    // app.get("/api/v3/conversations/:conversation_id/research-dossier", ...)
+    // app.post("/api/v3/conversations/:conversation_id/research-dossier/regenerate", ...)
+    // app.get("/api/v3/conversations/:conversation_id/research-dossier/pdf", ...)
 
     app.put(
       "/api/v3/users",
