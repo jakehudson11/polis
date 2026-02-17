@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import logger from "../../utils/logger";
-import { DynamoDBClient, DynamoDBClientConfig } from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   QueryCommand,
@@ -12,9 +12,9 @@ import p from "../../db/pg-query";
 import { getClusterAssignmentsSimple } from "../../utils/commentClusters";
 
 // DynamoDB configuration (reuse from topics.ts)
-const dynamoDBConfig: DynamoDBClientConfig = {
+const dynamoDBConfig = {
   region: Config.AWS_REGION || "us-east-1",
-};
+} as any;
 
 if (Config.dynamoDbEndpoint) {
   dynamoDBConfig.endpoint = Config.dynamoDbEndpoint;
@@ -66,7 +66,9 @@ export async function handle_GET_topicMod_topics(req: Request, res: Response) {
       topicsParams.ExpressionAttributeValues[":job_id"] = `${job_id}#`;
     }
 
-    const topicsData = await docClient.send(new QueryCommand(topicsParams));
+    const topicsData = await (docClient as any).send(
+      new QueryCommand(topicsParams)
+    );
 
     if (!topicsData.Items || topicsData.Items.length === 0) {
       return res.json({
@@ -87,7 +89,9 @@ export async function handle_GET_topicMod_topics(req: Request, res: Response) {
 
     let moderationData;
     try {
-      moderationData = await docClient.send(new QueryCommand(moderationParams));
+      moderationData = await (docClient as any).send(
+        new QueryCommand(moderationParams)
+      );
     } catch (err: unknown) {
       // Moderation table might not exist yet - that's okay
       logger.info("Moderation status table not found, using default status");

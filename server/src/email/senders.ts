@@ -55,7 +55,7 @@ async function sendTextEmail(
   };
 
   const command = new SendEmailCommand(params);
-  return sesClient.send(command);
+  return (sesClient as any).send(command);
 }
 
 async function sendMultipleTextEmails(

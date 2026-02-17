@@ -119,7 +119,11 @@ function query_readOnly(queryString: string, ...args: any[]) {
   return queryImpl(readPool, queryString, ...args);
 }
 
-function queryP_impl<T>(pool: Pool, queryString?: string, params?: any[]) {
+function queryP_impl(
+  pool: Pool,
+  queryString?: string,
+  params?: any[]
+): Promise<any> {
   if (!isString(queryString)) {
     return Promise.reject("query_was_not_string");
   }
@@ -129,7 +133,7 @@ function queryP_impl<T>(pool: Pool, queryString?: string, params?: any[]) {
       pool,
       queryString,
       params,
-      function (err: Error | null, result: { rows: T[] }) {
+      function (err: Error | null, result: any) {
         if (err) {
           return reject(err);
         }
@@ -143,23 +147,29 @@ function queryP_impl<T>(pool: Pool, queryString?: string, params?: any[]) {
   });
 }
 
-function queryP<T>(queryString: string, ...args: any[]) {
-  return queryP_impl<T>(readWritePool, queryString, ...args);
+function queryP<T = any>(queryString: string, ...args: any[]): Promise<any> {
+  return queryP_impl(readWritePool, queryString, ...args);
 }
 
-function queryP_readOnly<T>(queryString: string, ...args: any[]) {
-  return queryP_impl<T>(readPool, queryString, ...args);
+function queryP_readOnly<T = any>(
+  queryString: string,
+  ...args: any[]
+): Promise<any> {
+  return queryP_impl(readPool, queryString, ...args);
 }
 
-function queryP_readOnly_wRetryIfEmpty<T>(queryString: string, ...args: any[]) {
-  function retryIfEmpty(rows: T[]) {
+function queryP_readOnly_wRetryIfEmpty(
+  queryString: string,
+  ...args: any[]
+): Promise<any> {
+  function retryIfEmpty(rows: any[]) {
     if (!rows.length) {
-      return queryP<T>(queryString, ...args);
+      return queryP(queryString, ...args);
     }
     return Promise.resolve(rows);
   }
 
-  return queryP_impl<T>(readPool, queryString, ...args).then(
+  return queryP_impl(readPool, queryString, ...args).then(
     retryIfEmpty as any
   );
 }

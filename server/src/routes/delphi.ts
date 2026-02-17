@@ -248,7 +248,7 @@ const getLogs = async (
           nextToken: nextToken,
         });
 
-        const response = await logsClient.send(command);
+        const response = await (logsClient as any).send(command);
 
         if (response.events) {
           allEvents.push(...response.events);

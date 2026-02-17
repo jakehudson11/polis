@@ -2,7 +2,7 @@
 
 "use strict";
 
-import zlib, { InputType } from "zlib";
+import zlib, { InputType } from "node:zlib";
 import _ from "underscore";
 import LruCache from "lru-cache";
 import pg from "../db/pg-query";

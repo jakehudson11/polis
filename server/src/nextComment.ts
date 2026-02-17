@@ -1,5 +1,5 @@
 import _ from "underscore";
-import { DynamoDBClient, DynamoDBClientConfig } from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand } from "@aws-sdk/lib-dynamodb";
 
 import { GetCommentsParams } from "./d";
@@ -17,9 +17,9 @@ import {
 import { getCommentIdsForClusters } from "./utils/commentClusters";
 
 // DynamoDB client for topic agenda lookups
-const dynamoDBConfig: DynamoDBClientConfig = {
+const dynamoDBConfig = {
   region: Config.AWS_REGION || "us-east-1",
-};
+} as any;
 
 if (Config.dynamoDbEndpoint) {
   // Local/test DynamoDB

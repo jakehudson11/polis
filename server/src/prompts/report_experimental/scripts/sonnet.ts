@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { convertXML } from "simple-xml-to-json";
-import fs from "fs/promises";
+import fs from "node:fs/promises";
 import { parse } from "csv-parse/sync";
 import { create } from "xmlbuilder2";
 import logger from "../../../utils/logger";
@@ -67,7 +67,7 @@ export class PolisConverter {
   }
 
   static async convertFromFile(filePath: string): Promise<string> {
-    const fs = await import("fs/promises");
+    const fs = await import("node:fs/promises");
     const csvContent = await fs.readFile(filePath, "utf-8");
     return PolisConverter.convertToXml(csvContent);
   }

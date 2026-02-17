@@ -456,7 +456,7 @@ async function handle_POST_comments(req: RequestWithP, res: any) {
 
     // 4. Moderate the comment
     let active = true;
-    let mod = 0;
+    let mod = polisTypes.mod.unmoderated;
 
     // Always auto-approve seed comments regardless of pro status
     if (is_seed || is_moderator) {
@@ -467,6 +467,10 @@ async function handle_POST_comments(req: RequestWithP, res: any) {
       const moderationResult = await moderateComment(txt, conversation, ip);
       active = moderationResult.active;
       mod = moderationResult.mod;
+    }
+
+    if (!conversation.strict_moderation && active) {
+      mod = polisTypes.mod.ok;
     }
 
     // 5. Detect language
@@ -692,7 +696,7 @@ async function handle_GET_nextComment(
     return;
   }
 
-  const pid = req.p.pid || req.p.not_voted_by_pid;
+  const pid = req.p.pid ?? req.p.not_voted_by_pid ?? -1;
 
   try {
     const next = await getNextComment(
@@ -829,7 +833,7 @@ async function handle_POST_comments_bulk(
   }
 
   try {
-    const [finalPid, is_moderator] = await Promise.all([
+    const [finalPid, is_moderator, conversation] = await Promise.all([
       doGetPid(),
       isModerator(zid!, uid!),
       getConversationInfo(zid!),
@@ -883,10 +887,14 @@ async function handle_POST_comments_bulk(
 
         let active = true;
 
-        let mod = 0;
+        let mod = polisTypes.mod.unmoderated;
         if (is_moderator || is_seed) {
           mod = polisTypes.mod.ok;
           active = true;
+        }
+
+        if (!conversation.strict_moderation && active) {
+          mod = polisTypes.mod.ok;
         }
 
         const detection = Array.isArray(detections)

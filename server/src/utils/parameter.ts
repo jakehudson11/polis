@@ -457,7 +457,10 @@ function resolve_pidThing(
 
     // Check if we already have a valid PID from JWT authentication BEFORE extracting URL params
     const jwtProvidedValue = req.p[pidThingStringName];
-    const hasValidJwtPid = jwtProvidedValue && jwtProvidedValue >= 0;
+    const hasValidJwtPid =
+      jwtProvidedValue !== undefined &&
+      jwtProvidedValue !== null &&
+      jwtProvidedValue >= 0;
     const rawValue = _extractFromBody(req, pidThingStringName);
     const pidNumber = _integerOrUndefined(rawValue);
 

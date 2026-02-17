@@ -103,7 +103,7 @@ export function handle_GET_delphi(req: Request, res: Response) {
         logger.info(`Checking DynamoDB tables...`);
 
         // Execute the command and handle results
-        client
+        (client as any)
           .send(listTablesCommand)
           .then((tableData) => {
             // Make sure TableNames is defined

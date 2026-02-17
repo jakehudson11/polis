@@ -134,7 +134,7 @@ export default class DynamoStorageService {
       const describeCmd = new DescribeTableCommand({
         TableName: this.tableName,
       });
-      await this.client.send(describeCmd);
+      await (this.client as any).send(describeCmd);
       logger.info(`Table "${this.tableName}" exists and is accessible.`);
       return { success: true };
     } catch (error: any) {
@@ -162,7 +162,7 @@ export default class DynamoStorageService {
     const command = new PutCommand(params);
 
     try {
-      const response = await this.client.send(command);
+      const response = await (this.client as any).send(command);
       logger.debug(`Item stored successfully in ${this.tableName}:`, response);
       return { success: true, data: response };
     } catch (error: any) {
@@ -190,7 +190,7 @@ export default class DynamoStorageService {
     const command = new QueryCommand(params);
 
     try {
-      const response = await this.client.send(command);
+      const response = await (this.client as any).send(command);
       return { success: true, data: response.Items };
     } catch (error: any) {
       const storageError = this.createStorageError(error);
@@ -216,7 +216,7 @@ export default class DynamoStorageService {
     const command = new DeleteCommand(params);
 
     try {
-      const response = await this.client.send(command);
+      const response = await (this.client as any).send(command);
       logger.info("Item deleted successfully:", response);
       return { success: true, data: response };
     } catch (error: any) {
@@ -261,7 +261,7 @@ export default class DynamoStorageService {
       let itemsToDelete;
 
       try {
-        const scanResponse = await this.client.send(scanCommand);
+        const scanResponse = await (this.client as any).send(scanCommand);
         itemsToDelete = scanResponse.Items;
         lastEvaluatedKey = scanResponse.LastEvaluatedKey;
 
@@ -299,7 +299,7 @@ export default class DynamoStorageService {
         const deleteItemCommand = new DeleteItemCommand(deleteParams);
 
         try {
-          await this.client.send(deleteItemCommand);
+          await (this.client as any).send(deleteItemCommand);
           logger.debug(
             `Deleted item with rid_section_model: ${rid_section_model}${
               timestamp ? `, timestamp: ${timestamp}` : ""
@@ -345,7 +345,7 @@ export default class DynamoStorageService {
     const scanCommand = new ScanCommand(scanParams);
 
     try {
-      const scanResponse = await this.client.send(scanCommand);
+      const scanResponse = await (this.client as any).send(scanCommand);
       const items = scanResponse.Items;
 
       if (!items || items.length === 0) {

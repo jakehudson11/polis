@@ -155,6 +155,10 @@ import {
   handle_PUT_participants_extended,
 } from "./src/routes/participation";
 import {
+  handle_GET_conversationSummary,
+  handle_GET_participationStats,
+} from "./src/routes/manageStats";
+import {
   handle_GET_dataExport,
   handle_GET_dataExport_results,
 } from "./src/routes/dataExport";
@@ -718,6 +722,34 @@ helpersInitialized.then(
       want("report_id", getReportIdFetchRid, assignToPCustom("rid")),
       want("until", getInt, assignToP),
       handle_GET_conversationStats
+    );
+
+    app.get(
+      "/api/v3/conversationSummary",
+      moveToBody,
+      hybridAuth(assignToP),
+      need(
+        "conversation_id",
+        getConversationIdFetchZid,
+        assignToPCustom("zid")
+      ),
+      handle_GET_conversationSummary
+    );
+
+    app.get(
+      "/api/v3/participationStats",
+      moveToBody,
+      hybridAuth(assignToP),
+      need(
+        "conversation_id",
+        getConversationIdFetchZid,
+        assignToPCustom("zid")
+      ),
+      want("limit", getInt, assignToP),
+      want("offset", getInt, assignToP),
+      want("sort", getStringLimitLength(1, 50), assignToP),
+      want("q", getOptionalStringLimitLength(200), assignToP),
+      handle_GET_participationStats
     );
 
     app.get(

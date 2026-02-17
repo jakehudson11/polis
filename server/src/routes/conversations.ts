@@ -872,6 +872,20 @@ function handle_PUT_conversations(
         verifyMetaPromise = Promise.resolve();
       }
 
+      const strictModerationTransitionPromise = _.isUndefined(
+        req.p.strict_moderation
+      )
+        ? Promise.resolve(false)
+        : pg
+            .queryP_readOnly(
+              "select strict_moderation from conversations where zid = ($1) limit 1;",
+              [req.p.zid]
+            )
+            .then((rows: any) => {
+              const previousStrictModeration = !!(rows && rows[0]?.strict_moderation);
+              return previousStrictModeration && req.p.strict_moderation === false;
+            });
+
       const fields: ConversationType = {};
       console.log('🔧 PUT conversations - req.p keys:', Object.keys(req.p));
       console.log('🔧 PUT conversations - req.body keys:', (req as any).body ? Object.keys((req as any).body) : 'no body');
@@ -1005,8 +1019,8 @@ function handle_PUT_conversations(
         .where(sql_conversations.zid.equals(req.p.zid))
         // .and( sql_conversations.owner.equals(req.p.uid) )
         .returning("*");
-      verifyMetaPromise.then(
-        function () {
+      Promise.all([verifyMetaPromise, strictModerationTransitionPromise]).then(
+        function ([, shouldClearPendingComments]) {
           pg.query(q.toString(), function (err: any, result: { rows: any[] }) {
             if (err) {
               failJson(res, 500, "polis_err_update_conversation", err);
@@ -1022,7 +1036,14 @@ function handle_PUT_conversations(
               : Promise.resolve();
             const successCode = generateShortUrl ? 201 : 200;
 
-            promise
+            const clearPendingCommentsPromise = shouldClearPendingComments
+              ? pg.queryP(
+                  "update comments set mod = 1 where zid = ($1) and active = true and mod = 0 and coalesce(is_seed, false) = false;",
+                  [req.p.zid]
+                )
+              : Promise.resolve();
+
+            Promise.all([promise, clearPendingCommentsPromise])
               .then(function () {
                 // send notification email
                 if (req.p.send_created_email) {

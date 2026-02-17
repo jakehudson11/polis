@@ -3,7 +3,7 @@ import { GoogleGenAI } from "@google/genai";
 import config from "../config";
 import { convertXML } from "simple-xml-to-json";
 import logger from "./logger";
-import fs from "fs/promises";
+import fs from "node:fs/promises";
 
 const js2xmlparser = require("js2xmlparser");
 

@@ -158,6 +158,10 @@ import {
   handle_PUT_participants_extended,
 } from "./src/routes/participation";
 import {
+  handle_GET_conversationSummary,
+  handle_GET_participationStats,
+} from "./src/routes/manageStats";
+import {
   handle_GET_dataExport,
   handle_GET_dataExport_results,
 } from "./src/routes/dataExport";
@@ -783,6 +787,33 @@ helpersInitialized.then(
     );
 
     app.get(
+      "/api/v3/conversationSummary",
+      moveToBody,
+      hybridAuth(assignToP),
+      need(
+        "conversation_id",
+        getConversationIdFetchZid,
+        assignToPCustom("zid")
+      ),
+      handle_GET_conversationSummary
+    );
+
+    app.get(
+      "/api/v3/participationStats",
+      moveToBody,
+      hybridAuth(assignToP),
+      need(
+        "conversation_id",
+        getConversationIdFetchZid,
+        assignToPCustom("zid")
+      ),
+      want("limit", getInt, assignToP),
+      want("offset", getInt, assignToP),
+      want("sort", getStringLimitLength(1, 50), assignToP),
+      handle_GET_participationStats
+    );
+
+    app.get(
       "/api/v3/conversationUuid",
       moveToBody,
       hybridAuth(assignToP),
@@ -941,6 +972,8 @@ helpersInitialized.then(
         getConversationIdFetchZid,
         assignToPCustom("zid")
       ),
+      resolve_pidThing("pid", assignToP, "get:nextComment"),
+      want("not_voted_by_pid", getInt, assignToP),
       resolve_pidThing("not_voted_by_pid", assignToP, "get:nextComment"),
       want("without", getArrayOfInt, assignToP),
       // preferred language of nextComment

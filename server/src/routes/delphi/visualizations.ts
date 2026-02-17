@@ -121,7 +121,7 @@ export async function handle_GET_delphi_visualizations(
       logger.info(
         `Listing S3 objects with params: ${JSON.stringify(listObjectsParams)}`
       );
-      s3Response = await s3Client.send(
+      s3Response = await (s3Client as any).send(
         new ListObjectsV2Command(listObjectsParams)
       );
       logger.info(

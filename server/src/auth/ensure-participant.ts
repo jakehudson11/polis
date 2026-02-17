@@ -445,11 +445,35 @@ async function _ensureParticipantInternal(
     emailPasswordUser: req.p.emailPasswordUser,
   });
 
-  // For email/password users, if they don't have a participant type flag and pid is invalid,
-  // they need a new participant for this conversation
-  if (req.p.emailPasswordUser && !req.p.standard_user_participant && (pid === undefined || pid === -1 || pid === 0)) {
+  // For email/password users without a participant type flag:
+  // - pid undefined/-1 is invalid and should be cleared
+  // - pid 0 is only valid for the conversation owner
+  if (
+    req.p.emailPasswordUser &&
+    !req.p.standard_user_participant &&
+    (pid === undefined || pid === -1)
+  ) {
     console.log("🔍 [ensureParticipant] Email/password user needs participant creation");
-    pid = undefined; // Clear invalid pid
+    pid = undefined;
+  } else if (
+    req.p.emailPasswordUser &&
+    !req.p.standard_user_participant &&
+    pid === 0
+  ) {
+    const ownerRows = (await pg.queryP_readOnly(
+      "select owner from conversations where zid = ($1);",
+      [zid]
+    )) as { owner: number }[];
+
+    const ownerUid = ownerRows && ownerRows[0] ? ownerRows[0].owner : undefined;
+    const isOwner = uid !== undefined && ownerUid !== undefined && uid === ownerUid;
+
+    if (!isOwner) {
+      console.log(
+        "🔍 [ensureParticipant] Clearing pid=0 for non-owner email/password user"
+      );
+      pid = undefined;
+    }
   }
 
   if ((pid === undefined || pid === -1) && (createIfMissing || req.p.xid)) {
