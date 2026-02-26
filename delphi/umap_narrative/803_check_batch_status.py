@@ -31,9 +31,10 @@ TERMINAL_BATCH_STATES = [ANTHROPIC_BATCH_COMPLETED, ANTHROPIC_BATCH_ENDED, ANTHR
 NON_TERMINAL_BATCH_STATES = [ANTHROPIC_BATCH_PREPARING, ANTHROPIC_BATCH_IN_PROGRESS]
 
 # Script Exit Codes (when --job-id is used)
-EXIT_CODE_TERMINAL_STATE = 0      # Batch is done (completed/failed/cancelled), script handled it.
-EXIT_CODE_SCRIPT_ERROR = 1        # The script itself had an issue processing the specified job.
-EXIT_CODE_PROCESSING_CONTINUES = 3 # Batch is still processing, poller should wait and re-check.
+# The job poller treats exit code 0 as success and any non-zero as failure.
+EXIT_CODE_SUCCESS = 0
+EXIT_CODE_FAILURE = 1
+EXIT_CODE_PROCESSING_CONTINUES = 3  # Batch is still processing, poller should wait and re-check.
 
 class BatchStatusChecker:
     """Checks a single batch job's status and processes results if complete."""
@@ -56,13 +57,18 @@ class BatchStatusChecker:
             logger.error(f"Failed to initialize Anthropic client: {e}")
             self.anthropic = None
 
+        # Backwards-compatible aliases for older code paths in this module.
+        self.EXIT_CODE_TERMINAL_STATE = EXIT_CODE_SUCCESS
+        self.EXIT_CODE_SCRIPT_ERROR = EXIT_CODE_FAILURE
+        self.EXIT_CODE_PROCESSING_CONTINUES = EXIT_CODE_PROCESSING_CONTINUES
+
     async def check_and_process_job(self, job_id: str) -> int:
         """
         Main logic: Fetches a job, checks its batch status, and processes if complete.
         Returns an exit code to the calling process.
         """
         if not self.anthropic:
-            return EXIT_CODE_SCRIPT_ERROR
+            return EXIT_CODE_FAILURE
 
         try:
             # 1. Fetch the single job we are responsible for checking.
@@ -70,13 +76,13 @@ class BatchStatusChecker:
             job_item = response.get('Item')
             if not job_item:
                 logger.error(f"Job {job_id} not found in DynamoDB.")
-                return EXIT_CODE_SCRIPT_ERROR
+                return EXIT_CODE_FAILURE
 
             batch_id = job_item.get('batch_id')
             if not batch_id:
                 logger.error(f"Job {job_id} is missing a 'batch_id'. Cannot check status.")
                 self.job_table.update_item(Key={'job_id': job_id}, UpdateExpression="SET #s = :s", ExpressionAttributeNames={'#s':'status'}, ExpressionAttributeValues={':s':'FAILED'})
-                return EXIT_CODE_TERMINAL_STATE
+                return EXIT_CODE_FAILURE
 
             # 2. Check the status on the Anthropic API
             logger.info(f"Checking status for Anthropic batch {batch_id} (from job {job_id})...")
@@ -86,13 +92,13 @@ class BatchStatusChecker:
 
             # 3. Decide what to do based on the status
             if status in ["completed", "ended"]:
-                await self.process_batch_results(job_item)
-                return EXIT_CODE_TERMINAL_STATE
+                ok = await self.process_batch_results(job_item)
+                return EXIT_CODE_SUCCESS if ok else EXIT_CODE_FAILURE
             
             elif status in ["failed", "cancelled"]:
                 logger.error(f"Batch {batch_id} for job {job_id} is in a terminal failure state: {status}")
                 self.job_table.update_item(Key={'job_id': job_id}, UpdateExpression="SET #s = :s, error_message = :e", ExpressionAttributeNames={'#s':'status'}, ExpressionAttributeValues={':s':'FAILED', ':e': f'Batch status: {status}'})
-                return EXIT_CODE_TERMINAL_STATE
+                return EXIT_CODE_FAILURE
 
             elif status in ["in_progress", "preparing"]:
                 logger.info(f"Batch {batch_id} is still {status}. Will check again later.")
@@ -100,17 +106,17 @@ class BatchStatusChecker:
             
             else:
                 logger.error(f"Unrecognized batch status '{status}' for batch {batch_id}.")
-                return EXIT_CODE_SCRIPT_ERROR
+                return EXIT_CODE_FAILURE
 
         except ClientError as e:
             if "ResourceNotFoundException" in str(e):
                  logger.error(f"Job {job_id} not found in DynamoDB during processing.")
             else:
                 logger.error(f"A DynamoDB error occurred processing job {job_id}: {e}", exc_info=True)
-            return EXIT_CODE_SCRIPT_ERROR
+            return EXIT_CODE_FAILURE
         except Exception as e:
             logger.error(f"A critical error occurred processing job {job_id}: {e}", exc_info=True)
-            return EXIT_CODE_SCRIPT_ERROR
+            return EXIT_CODE_FAILURE
 
     async def process_batch_results(self, job_item: Dict) -> bool:
         """Downloads, parses, and stores results for a completed batch job."""
@@ -131,7 +137,8 @@ class BatchStatusChecker:
             failed_count = 0
             
             for entry in results_stream:
-                if entry.result.type == "succeeded":
+                result_type = getattr(entry.result, 'type', None)
+                if result_type == "succeeded":
                     custom_id = entry.custom_id
                     response_message = entry.result.message
                     model = response_message.model
@@ -160,9 +167,25 @@ class BatchStatusChecker:
                     logger.info(f"Job {job_id}: Successfully stored report for section '{section_name}'.")
                     processed_count += 1
 
-                elif entry.result.type == "failed":
+                elif result_type in ("failed", "errored", "canceled", "cancelled", "expired"):
                     failed_count += 1
-                    logger.error(f"Job {job_id}: A request in batch {batch_id} failed. Custom ID: {entry.custom_id}, Error: {entry.result.error}")
+                    # Different SDK result types expose errors slightly differently; be defensive.
+                    error_obj = getattr(entry.result, 'error', None)
+                    try:
+                        error_text = str(error_obj)
+                    except Exception:
+                        error_text = repr(error_obj)
+                    logger.error(
+                        f"Job {job_id}: A request in batch {batch_id} did not succeed. "
+                        f"Result type: {result_type}. Custom ID: {entry.custom_id}. Error: {error_text}"
+                    )
+
+                else:
+                    failed_count += 1
+                    logger.error(
+                        f"Job {job_id}: Unrecognized batch entry result type '{result_type}'. "
+                        f"Custom ID: {getattr(entry, 'custom_id', None)}"
+                    )
 
             # Finalize the job status
             final_status = 'COMPLETED' if processed_count > 0 else 'FAILED'
@@ -172,6 +195,9 @@ class BatchStatusChecker:
             if failed_count > 0:
                 update_expression += ", error_message = :error"
                 expression_values[':error'] = f"{failed_count} of {failed_count + processed_count} batch requests failed."
+            elif processed_count == 0:
+                update_expression += ", error_message = :error"
+                expression_values[':error'] = "No results were returned by the batch results stream."
 
             self.job_table.update_item(
                 Key={'job_id': job_id},

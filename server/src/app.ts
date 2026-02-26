@@ -39,6 +39,7 @@ import {
 import { handle_GET_delphi_visualizations } from "./src/routes/delphi/visualizations";
 import { handle_POST_delphi_jobs } from "./src/routes/delphi/jobs";
 import { handle_GET_delphi_reports } from "./src/routes/delphi/reports";
+import { handle_GET_delphi_hierarchy } from "./src/routes/delphi/hierarchy";
 import { handle_POST_delphi_batch_reports } from "./src/routes/delphi/batchReports";
 import { handle_GET_participation_topicPrioritize } from "./src/routes/participation/topicPrioritize";
 
@@ -137,6 +138,7 @@ import {
 import {
   handle_GET_math_pca,
   handle_GET_math_pca2,
+  handle_GET_math_repness,
   handle_POST_math_update,
   handle_GET_math_correlationMatrix,
   handle_GET_bidToPid,
@@ -358,6 +360,10 @@ helpersInitialized.then(
     ////////////////////////////////////////////
     ////////////////////////////////////////////
 
+    app.get("/api/v3/ping", function (_req, res) {
+      res.status(200).json({ status: "ok" });
+    });
+
     app.get("/api/v3/math/pca", handle_GET_math_pca);
 
     app.get(
@@ -376,6 +382,24 @@ helpersInitialized.then(
         assignToPCustom("ifNoneMatch")
       ),
       handle_GET_math_pca2
+    );
+
+    app.get(
+      "/api/v3/math/repness",
+      moveToBody,
+      redirectIfHasZidButNoConversationId, // TODO remove once
+      need(
+        "conversation_id",
+        getConversationIdFetchZid,
+        assignToPCustom("zid")
+      ),
+      want("math_tick", getInt, assignToP),
+      wantHeader(
+        "If-None-Match",
+        getStringLimitLength(1000),
+        assignToPCustom("ifNoneMatch")
+      ),
+      handle_GET_math_repness
     );
 
     app.get(
@@ -1017,6 +1041,18 @@ helpersInitialized.then(
         res.json({
           status: "error",
           message: "Internal server error in reports endpoint",
+          error: err.message || "Unknown error",
+        });
+      }
+    });
+
+    app.get("/api/v3/delphi/hierarchy", moveToBody, function (req, res) {
+      try {
+        handle_GET_delphi_hierarchy(req, res);
+      } catch (err) {
+        res.json({
+          status: "error",
+          message: "Internal server error in hierarchy endpoint",
           error: err.message || "Unknown error",
         });
       }
@@ -2287,7 +2323,8 @@ helpersInitialized.then(
     app.get(/^\/report_style.*\.css$/, proxy);
 
     // ends in slash? redirect to non-slash version
-    app.get(/.*\//, function (req, res) {
+    // NOTE: must not match API routes (e.g. /api/v3/*), otherwise they get proxied to the static file host.
+    app.get(/^\/(?!api\/).*\/$/, function (req, res) {
       let pathAndQuery = req.originalUrl;
 
       // remove slash at end
@@ -2313,14 +2350,14 @@ helpersInitialized.then(
     if (missingFilesGet404) {
       // 404 everything else
       app.get(
-        /^\/[^(api\/)]?.*/,
+        /^\/(?!api\/).*/,
         makeFileFetcher(hostname, staticFilesAdminPort, "/404.html", {
           "Content-Type": "text/html",
         })
       );
     } else {
       // proxy everything else
-      app.get(/^\/[^(api\/)]?.*/, proxy);
+      app.get(/^\/(?!api\/).*/, proxy);
     }
 
     // move app.listen to index.ts

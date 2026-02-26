@@ -166,7 +166,8 @@ def main():
     parser.add_argument('--zid', type=int, required=True, help='Conversation ID')
     parser.add_argument('--force', action='store_true', help='Force recalculation of values')
     parser.add_argument('--verbose', action='store_true', help='Show detailed output')
-    parser.add_argument('--include_moderation', type=bool, default=False, help='Whether or not to include moderated comments in reports. If false, moderated comments will appear.')
+    parser.add_argument('--include_moderation', action='store_true',
+                        help='Include moderated comments in reports (flag: present=True, absent=False).')
     args = parser.parse_args()
     args = parser.parse_args()
     

@@ -119,6 +119,103 @@ function handle_GET_math_pca2(
     });
 }
 
+// Cache the knowledge of whether there are any PCA rows for a given zid.
+// Used by endpoints that need to decide whether to return 304 vs an empty 200.
+const pcaRowExistsForZidCache: Record<
+  number,
+  { exists: boolean; checkedAt: number }
+> = {};
+
+function doesPcaRowExistForZid(zid: number): Promise<boolean> {
+  const cached = pcaRowExistsForZidCache[zid];
+  if (cached && cached.checkedAt > Date.now() - 30_000) {
+    return Promise.resolve(cached.exists);
+  }
+
+  return pg
+    .queryP_readOnly(
+      "select 1 from math_main where zid = ($1) and math_env = ($2) limit 1;",
+      [zid, Config.mathEnv]
+    )
+    .then((rows: any[]) => {
+      const exists = !!(rows && rows.length);
+      pcaRowExistsForZidCache[zid] = { exists, checkedAt: Date.now() };
+      return exists;
+    })
+    .catch((err: any) => {
+      logger.error("polis_err_math_repness_check_exists", { zid, err });
+      // Fail open: if we can't determine existence, treat as existing so clients can keep polling via 304.
+      return true;
+    });
+}
+
+function handle_GET_math_repness(
+  req: { p: { zid: number; math_tick: any; ifNoneMatch: any } },
+  res: {
+    status: (arg0: number) => {
+      (): any;
+      new (): any;
+      end: { (): void; new (): any };
+      json: (arg0: any) => void;
+    };
+    set: (arg0: { Etag: string }) => void;
+    json: (arg0: any) => void;
+  }
+) {
+  const zid = req.p.zid;
+  let math_tick = req.p.math_tick;
+
+  const ifNoneMatch = req.p.ifNoneMatch;
+  if (ifNoneMatch) {
+    if (math_tick !== undefined) {
+      return failJson(
+        res,
+        400,
+        "Expected either math_tick param or If-Not-Match header, but not both."
+      );
+    }
+    if (ifNoneMatch.includes("*")) {
+      math_tick = 0;
+    } else {
+      const entries = ifNoneMatch.split(/ *, */).map((x: string) => {
+        return Number(
+          x
+            .replace(/^[wW]\//, "")
+            .replace(/^"/, "")
+            .replace(/"$/, "")
+        );
+      });
+      math_tick = Math.min(...entries);
+    }
+  } else if (math_tick === undefined) {
+    math_tick = -1;
+  }
+
+  getPca(zid, math_tick)
+    .then((data: PcaCacheItem | undefined) => {
+      if (data) {
+        const repness = (data.asPOJO && data.asPOJO.repness) || {};
+        res.set({ Etag: '"' + data.asPOJO.math_tick + '"' });
+        res.status(200).json({ repness, math_tick: data.asPOJO.math_tick });
+        return;
+      }
+
+      // No newer PCA data available for this math_tick.
+      // If PCA has never been computed for this conversation, return an empty 200.
+      return doesPcaRowExistForZid(zid).then((exists) => {
+        if (!exists) {
+          res.set({ Etag: '"0"' });
+          res.status(200).json({ repness: {}, math_tick: 0 });
+        } else {
+          res.status(304).end();
+        }
+      });
+    })
+    .catch((err: any) => {
+      failJson(res, 500, err);
+    });
+}
+
 function handle_POST_math_update(
   req: { p: { zid: number; uid?: number; math_update_type: any } },
   res: {
@@ -380,5 +477,6 @@ export {
   handle_GET_math_correlationMatrix,
   handle_GET_math_pca,
   handle_GET_math_pca2,
+  handle_GET_math_repness,
   handle_POST_math_update,
 };

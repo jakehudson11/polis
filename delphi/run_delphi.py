@@ -33,7 +33,8 @@ def main():
     parser.add_argument("--force", action="store_true", help="Force reprocessing even if data exists")
     parser.add_argument("--validate", action="store_true", help="Run extra validation checks")
     parser.add_argument("--help", action="store_true", help="Show this help message")
-    parser.add_argument('--include_moderation', type=bool, default=False, help='Whether or not to include moderated comments in reports. If false, moderated comments will appear.')
+    parser.add_argument('--include_moderation', action='store_true',
+                        help='Include moderated comments in reports (flag: present=True, absent=False).')
     parser.add_argument('--region', type=str, default='us-east-1', help='AWS region')
 
     args = parser.parse_args()
@@ -69,18 +70,20 @@ def main():
 
     print(f"{GREEN}Processing conversation {zid}...{NC}")
 
-    # Set model
-    model = os.environ.get("OLLAMA_MODEL")
-    if not model:
-        print(f"{RED}Error: OLLAMA_MODEL environment variable not set.{NC}")
+    # Anthropic configuration for LLM-based topic naming
+    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    anthropic_model = os.environ.get("ANTHROPIC_MODEL")
+    if not anthropic_api_key:
+        print(f"{RED}Error: ANTHROPIC_API_KEY environment variable not set.{NC}")
         sys.exit(1)
-    print(f"{YELLOW}Using Ollama model: {model}{NC}")
+    if not anthropic_model:
+        print(f"{RED}Error: ANTHROPIC_MODEL environment variable not set.{NC}")
+        sys.exit(1)
+    print(f"{YELLOW}Using Anthropic model for topic naming: {anthropic_model}{NC}")
 
     # Set up environment for the pipeline
     app_path = os.environ.get('DELPHI_APP_PATH', '/app')
     os.environ["PYTHONPATH"] = f"{app_path}:{os.environ.get('PYTHONPATH', '')}"
-    os.environ["OLLAMA_HOST"] = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
-    # OLLAMA_MODEL is already set and checked
     max_votes = os.environ.get("MAX_VOTES")
     max_votes_arg = f"--max-votes={max_votes}" if max_votes else ""
     if max_votes:
@@ -117,9 +120,10 @@ def main():
     umap_command = [
         "python", f"{app_path}/umap_narrative/run_pipeline.py",
         f"--zid={zid}",
-        f"--include_moderation={args.include_moderation}",
-        "--use-ollama"
+        "--enable-llm-topic-naming"
     ]
+    if args.include_moderation:
+        umap_command.append("--include_moderation")
     if verbose_arg:
         umap_command.append(verbose_arg)
 
@@ -131,8 +135,9 @@ def main():
     extremity_command = [
         "python", f"{app_path}/umap_narrative/501_calculate_comment_extremity.py",
         f"--zid={zid}",
-        f"--include_moderation={args.include_moderation}"
     ]
+    if args.include_moderation:
+        extremity_command.append("--include_moderation")
     if verbose_arg:
         extremity_command.append(verbose_arg)
     if force_arg:
@@ -248,13 +253,12 @@ def main():
         print(f"{GREEN}UMAP Narrative pipeline completed successfully!{NC}")
         print(f"Results stored in DynamoDB and visualizations for conversation {zid}")
     else:
-        print(f"{RED}Warning: UMAP Narrative pipeline returned non-zero exit code: {pipeline_exit_code}{NC}")
-        print("The pipeline may have encountered errors but might still have produced partial results.")
-        # Don't fail the overall script, just warn
-        pipeline_exit_code = 0
+        print(f"{RED}Error: UMAP Narrative pipeline failed with exit code: {pipeline_exit_code}{NC}")
+        print("Aborting: downstream steps may rely on successful pipeline outputs.")
+        sys.exit(pipeline_exit_code)
 
-
-    exit_code = pipeline_exit_code # Based on the logic, this will be 0 unless math pipeline failed earlier
+    # Success (math pipeline already exited non-zero earlier if it failed)
+    sys.exit(0)
 
     if exit_code == 0: # This condition relies on math_exit_code check above.
         print(f"{GREEN}Pipeline completed successfully!{NC}")

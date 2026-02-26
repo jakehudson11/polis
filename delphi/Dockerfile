@@ -94,7 +94,7 @@ EXPOSE 8080
 # PYTHONPATH not needed since packages are properly installed via pip
 
 # Make scripts executable
-RUN chmod +x run_delphi.py scripts/setup_ollama.sh
+RUN chmod +x run_delphi.py
 
 CMD ["bash", "-c", "\
   echo 'Ensuring DynamoDB tables are set up (runs in all environments)...'; \
@@ -104,7 +104,6 @@ CMD ["bash", "-c", "\
   if [ -n \"${DYNAMODB_ENDPOINT}\" ]; then \
     echo 'DYNAMODB_ENDPOINT is set, assuming local/dev environment. Running additional local setup scripts...'; \
     echo 'Setting up MinIO bucket...' && python setup_minio.py && \
-    echo 'Setting up Ollama model (local script)...' && ./scripts/setup_ollama.sh && \
     echo 'Starting job poller without ddtrace...' && \
     python scripts/job_poller.py --interval=2; \
   else \

@@ -134,6 +134,7 @@ import { handle_POST_generate_guiding_questions } from "./src/routes/guidingQues
 import {
   handle_GET_math_pca,
   handle_GET_math_pca2,
+  handle_GET_math_repness,
   handle_POST_math_update,
   handle_GET_math_correlationMatrix,
   handle_GET_bidToPid,
@@ -339,6 +340,10 @@ helpersInitialized.then(
     app.all("/font/*", addCorsHeader);
     app.all("/api/v3/*", middleware_check_if_options);
 
+    app.get("/api/v3/ping", function (_req, res) {
+      res.status(200).json({ status: "ok" });
+    });
+
     ////////////////////////////////////////////
     ////////////////////////////////////////////
     ////////////////////////////////////////////
@@ -373,6 +378,24 @@ helpersInitialized.then(
         assignToPCustom("ifNoneMatch")
       ),
       handle_GET_math_pca2
+    );
+
+    app.get(
+      "/api/v3/math/repness",
+      moveToBody,
+      redirectIfHasZidButNoConversationId, // TODO remove once
+      need(
+        "conversation_id",
+        getConversationIdFetchZid,
+        assignToPCustom("zid")
+      ),
+      want("math_tick", getInt, assignToP),
+      wantHeader(
+        "If-None-Match",
+        getStringLimitLength(1000),
+        assignToPCustom("ifNoneMatch")
+      ),
+      handle_GET_math_repness
     );
 
     app.get(
@@ -2352,7 +2375,8 @@ helpersInitialized.then(
     app.get(/^\/report_style.*\.css$/, proxy);
 
     // ends in slash? redirect to non-slash version
-    app.get(/.*\//, function (req, res) {
+    // Important: must not match API routes, otherwise they can get proxied to the static file host.
+    app.get(/^\/(?!api\/).*\/$/, function (req, res) {
       let pathAndQuery = req.originalUrl;
 
       // remove slash at end
@@ -2378,14 +2402,14 @@ helpersInitialized.then(
     if (missingFilesGet404) {
       // 404 everything else
       app.get(
-        /^\/[^(api\/)]?.*/,
+        /^\/(?!api\/).*/,
         makeFileFetcher(hostname, staticFilesAdminPort, "/404.html", {
           "Content-Type": "text/html",
         })
       );
     } else {
       // proxy everything else
-      app.get(/^\/[^(api\/)]?.*/, proxy);
+      app.get(/^\/(?!api\/).*/, proxy);
     }
 
     // move app.listen to index.ts

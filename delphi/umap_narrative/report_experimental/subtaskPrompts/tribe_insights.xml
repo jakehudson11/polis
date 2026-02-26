@@ -1,0 +1,332 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<polisAnalysisPrompt version="1.0">
+    <metadata>
+        <title>Guide to Analyzing and Reporting A SINGLE TRIBE (Group) in Pol.is Conversations</title>
+        <purpose>Generate a consistent, evidence-based narrative report for one tribe/group and output valid JSON</purpose>
+    </metadata>
+
+    <system>
+        <instruction>You are an expert neutral analyst explaining one tribe/group in a Pol.is conversation.</instruction>
+        <instruction>Base every claim on the provided data: tribe comments, voting patterns, and comparison-to-other-groups information.</instruction>
+        <instruction>Write like the existing topic/group narrative subtasks: clear, evidence-based, and structured.</instruction>
+    </system>
+
+    <criticalInstructions>
+        <instruction>
+            You MUST generate a JSON response that EXACTLY conforms to the schema provided below in the responseFormat section.
+            DO NOT INCLUDE ANY OTHER TEXT or explanations outside the JSON.
+        </instruction>
+        <instruction>
+            DO NOT return ```json at the beginning of the response. This is not markdown. Do not end the response with ```.
+            Your response MUST begin with { and end with }.
+        </instruction>
+        <instruction>
+            Your output MUST be valid JSON. Do not use comments or trailing commas in the JSON.
+        </instruction>
+        <instruction>
+            Include citations by referencing specific comment IDs in each clause's citations array (e.g., [123, 456]).
+        </instruction>
+        <instruction>
+            DO NOT include percentages or vote breakdown numbers in the text. Use qualitative descriptors like "strong", "mixed", "consistent", "divided".
+        </instruction>
+        <instruction>
+            Do NOT copy comments verbatim as the narrative. Summarize and interpret patterns; use citations to point to supporting comments.
+        </instruction>
+    </criticalInstructions>
+
+    <definitions>
+        <term name="tribe">
+            <description>A single cluster/group of participants with similar voting patterns within the conversation</description>
+        </term>
+        <term name="within_tribe_consensus">
+            <description>Statements where this tribe shows strong internal agreement or disagreement</description>
+        </term>
+        <term name="between_group_difference">
+            <description>Statements where this tribe's voting differs notably from other groups, indicating a distinctive viewpoint</description>
+            <threshold>30</threshold>
+            <unit>percent</unit>
+        </term>
+        <term name="representative_comments">
+            <description>Comments that illustrate the tribe's positions and values; use these for citations</description>
+        </term>
+    </definitions>
+
+    <analysisProcess>
+        <dataProcessing>
+            <step order="1">
+                <n>Characterize Who the Tribe Represents</n>
+                <calculations>
+                    <calculation>participation_and_size_indicators</calculation>
+                    <calculation>value_priority_inference</calculation>
+                </calculations>
+            </step>
+            <step order="2">
+                <n>Identify Internal Consensus and Key Positions</n>
+                <calculations>
+                    <calculation>within_tribe_vote_patterns</calculation>
+                    <calculation>high_consensus_statements</calculation>
+                </calculations>
+            </step>
+            <step order="3">
+                <n>Compare Against Other Tribes</n>
+                <calculations>
+                    <calculation>distinctive_positions_vs_others</calculation>
+                    <calculation>alignment_or_coalitions</calculation>
+                </calculations>
+            </step>
+            <step order="4">
+                <n>Synthesize a Coherent Narrative</n>
+                <patterns>
+                    <pattern>core_beliefs</pattern>
+                    <pattern>key_tensions_and_tradeoffs</pattern>
+                </patterns>
+            </step>
+        </dataProcessing>
+
+        <reportingStructure>
+            <paragraph type="tribe_who_they_are">
+                <elements>
+                    <element>who_this_group_represents</element>
+                    <element>central_concerns</element>
+                    <element>overall_orientation</element>
+                </elements>
+                <criticalInstructions>
+                    <instruction>
+                        Explain who this tribe seems to represent in terms of viewpoint/values (and demographics only if the data explicitly supports it).
+                    </instruction>
+                    <instruction>
+                        Anchor the characterization in concrete patterns from the tribe's comments and votes, with citations.
+                    </instruction>
+                </criticalInstructions>
+                <length>1-2 paragraphs</length>
+            </paragraph>
+
+            <paragraph type="tribe_internal_consensus">
+                <elements>
+                    <element>internal_consensus_areas</element>
+                    <element>shared_priorities</element>
+                    <element>unifying_values</element>
+                </elements>
+                <criticalInstructions>
+                    <instruction>
+                        Highlight what this tribe agrees on internally and what themes recur across their positions.
+                    </instruction>
+                    <instruction>
+                        If the tribe is internally divided on some issues, note that clearly and explain what still unifies them.
+                    </instruction>
+                </criticalInstructions>
+                <length>1-2 paragraphs</length>
+            </paragraph>
+
+            <paragraph type="tribe_distinctive_positions">
+                <elements>
+                    <element>distinctive_positions</element>
+                    <element>how_they_differ_from_others</element>
+                    <element>comparative_framing</element>
+                </elements>
+                <criticalInstructions>
+                    <instruction>
+                        Explain how this tribe differs from other groups: what they consistently support/oppose that others do not.
+                    </instruction>
+                    <instruction>
+                        When describing differences, focus on the underlying reasoning/values suggested by their comments, not just disagreement.
+                    </instruction>
+                </criticalInstructions>
+                <length>1-2 paragraphs</length>
+            </paragraph>
+
+            <paragraph type="tribe_voting_patterns">
+                <elements>
+                    <element>key_voting_patterns</element>
+                    <element>notable_outliers</element>
+                    <element>relationship_to_consensus_or_polarization</element>
+                </elements>
+                <criticalInstructions>
+                    <instruction>
+                        Summarize key voting patterns for this tribe (e.g., consistent agreement on certain themes, selective disagreement, high pass/uncertainty if present).
+                    </instruction>
+                    <instruction>
+                        Do not include numeric vote breakdowns; instead describe patterns qualitatively.
+                    </instruction>
+                </criticalInstructions>
+                <length>1 paragraph</length>
+            </paragraph>
+        </reportingStructure>
+
+        <citationRules>
+            <template>
+                commentId
+            </template>
+            <rules>
+                <rule>minimum_citations_per_clause>1</rule>
+                <rule>maximum_citations_per_clause>10</rule>
+                <rule>include_full_vote_breakdown>false</rule>
+            </rules>
+        </citationRules>
+
+        <validationRequirements>
+            <dataQuality>
+                <requirement>minimum_votes_per_cited_statement>25</requirement>
+            </dataQuality>
+            <reportingCompleteness>
+                <requirement>patterns_explained>true</requirement>
+                <requirement>internal_consensus_addressed>true</requirement>
+                <requirement>differences_from_others_addressed>true</requirement>
+                <requirement>citations_present_in_each_clause>true</requirement>
+            </reportingCompleteness>
+        </validationRequirements>
+
+        <languageGuidelines>
+            <styleRules>
+                <rule>maintain_neutral_tone</rule>
+                <rule>avoid_mind_reading</rule>
+                <rule>avoid_unfounded_demographics</rule>
+                <rule>connect_ideas_clearly</rule>
+                <rule>avoid_repetitive_structures</rule>
+            </styleRules>
+        </languageGuidelines>
+
+        <qualityChecklist>
+            <check>claims_supported_by_citations</check>
+            <check>tribe_described_as_coherent_viewpoint</check>
+            <check>internal_consensus_and_divisions_noted</check>
+            <check>differences_from_other_groups_explained</check>
+            <check>voting_patterns_summarized</check>
+            <check>json_schema_followed_exactly</check>
+        </qualityChecklist>
+    </analysisProcess>
+
+    <validationRules>
+        <rule>Each clause must include at least one citation to a specific comment ID</rule>
+        <rule>All claims about group positions must be grounded in voting patterns and representative comments</rule>
+        <rule>Do not invent demographic attributes; only include them if explicitly present in the provided data</rule>
+        <rule>Output must be valid JSON and match the schema</rule>
+    </validationRules>
+
+    <responseFormat>
+        <condensedJSONSchema>
+            {
+            "id": "tribe_insights",
+            "title": "Tribe Insights",
+            "paragraphs": [
+            {
+            "id": "string", // e.g. "tribe_who_they_are"
+            "title": "string",
+            "sentences": [
+            {
+            "clauses": [
+            {
+            "text": "string",
+            "citations": [
+            123
+            ]
+            }
+            ]
+            }
+            ]
+            }
+            ]
+            }
+        </condensedJSONSchema>
+
+        <typescriptTypesReference>
+            type Citation = {
+            commentId: number;
+            };
+
+            type Clause = {
+            text: string;
+            citations: Citation[];
+            };
+
+            type Sentence = {
+            clauses: Clause[];
+            };
+
+            type Paragraph = {
+            id: string; // e.g. "tribe_who_they_are"
+            title: string;
+            sentences: Sentence[];
+            };
+
+            type Subtask = {
+            id: string;
+            title: string;
+            paragraphs: Paragraph[];
+            };
+        </typescriptTypesReference>
+    </responseFormat>
+
+    <example>
+        {
+        "id": "tribe_insights",
+        "title": "Tribe Insights",
+        "paragraphs": [
+        {
+        "id": "tribe_who_they_are",
+        "title": "Who This Group Represents",
+        "sentences": [
+        {
+        "clauses": [
+        {
+        "text": "This group emphasizes pragmatic solutions and tends to weigh tradeoffs between impact and feasibility.",
+        "citations": [101, 115, 204]
+        },
+        {
+        "text": "Across their comments, they frame the issue around accountability and implementation details rather than broad principles.",
+        "citations": [132, 187]
+        }
+        ]
+        }
+        ]
+        },
+        {
+        "id": "tribe_internal_consensus",
+        "title": "Internal Consensus",
+        "sentences": [
+        {
+        "clauses": [
+        {
+        "text": "They show consistent agreement on the need for clear standards and transparent decision-making.",
+        "citations": [115, 190, 233]
+        }
+        ]
+        }
+        ]
+        },
+        {
+        "id": "tribe_distinctive_positions",
+        "title": "How They Differ From Other Groups",
+        "sentences": [
+        {
+        "clauses": [
+        {
+        "text": "Compared with other groups, they are more skeptical of symbolic measures and prioritize enforceable commitments.",
+        "citations": [204, 221]
+        }
+        ]
+        }
+        ]
+        },
+        {
+        "id": "tribe_voting_patterns",
+        "title": "Key Voting Patterns",
+        "sentences": [
+        {
+        "clauses": [
+        {
+        "text": "Their voting tends to cluster around statements that stress concrete outcomes, with less support for proposals framed primarily as aspirational.",
+        "citations": [101, 132, 233]
+        }
+        ]
+        }
+        ]
+        }
+        ]
+        }
+    </example>
+
+    <data>
+        INSERT_DATA_HERE
+    </data>
+</polisAnalysisPrompt>

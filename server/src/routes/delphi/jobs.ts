@@ -55,7 +55,8 @@ export async function handle_POST_delphi_jobs(
       priority = 50,
       max_votes,
       batch_size,
-      model = "claude-3-7-sonnet-20250219",
+      // Prefer the runtime-configured Anthropic model to avoid defaulting to an unsupported name.
+      model = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514",
       include_topics = true,
       include_moderation = false, // ignore comments that recieve a failing moderation score
     } = req.body;

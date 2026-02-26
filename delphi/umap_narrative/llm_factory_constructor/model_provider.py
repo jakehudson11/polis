@@ -9,6 +9,7 @@ allowing for easy configuration and switching between model providers.
 import os
 import json
 import logging
+import time
 import requests
 from typing import Dict, List, Optional, Union, Any
 
@@ -203,95 +204,94 @@ class AnthropicProvider(ModelProvider):
             Model response as string
         """
         if not self.api_key:
-            return json.dumps({
-                "id": "polis_narrative_error_message",
-                "title": "API Key Missing",
-                "paragraphs": [
-                    {
-                        "id": "polis_narrative_error_message",
-                        "title": "API Key Missing",
-                        "sentences": [
-                            {
-                                "clauses": [
-                                    {
-                                        "text": "No Anthropic API key provided. Set ANTHROPIC_API_KEY env var or pass api_key parameter.",
-                                        "citations": []
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                ]
-            })
+            raise ValueError(
+                "No Anthropic API key provided. Set ANTHROPIC_API_KEY env var or pass api_key parameter."
+            )
         
-        try:
-            logger.info(f"Using Anthropic model: {self.model_name}")
-            
-            if self.client:
-                # Use the Anthropic package if available
-                message = self.client.messages.create(
-                    model=self.model_name,
-                    system=system_message,
-                    messages=[
-                        {"role": "user", "content": user_message}
-                    ],
-                    max_tokens=4000
-                )
-                result = message.content[0].text
-            else:
-                # Use direct HTTP request
-                headers = {
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json"
-                }
-                
-                # Add more debugging
-                logger.info(f"Using Anthropic model '{self.model_name}' via direct HTTP request")
-                logger.info(f"API key starts with: {self.api_key[:8]}...")
-                
-                data = {
-                    "model": self.model_name,
-                    "system": system_message,
-                    "messages": [
-                        {"role": "user", "content": user_message}
-                    ],
-                    "max_tokens": 4000
-                }
-                
+        logger.info(f"Using Anthropic model: {self.model_name}")
+
+        if self.client:
+            # Use the Anthropic package if available
+            message = self.client.messages.create(
+                model=self.model_name,
+                system=system_message,
+                messages=[{"role": "user", "content": user_message}],
+                max_tokens=4000,
+            )
+            return message.content[0].text
+
+        # Use direct HTTP request with retries for transient overload/rate limiting.
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+
+        data = {
+            "model": self.model_name,
+            "system": system_message,
+            "messages": [{"role": "user", "content": user_message}],
+            "max_tokens": 4000,
+        }
+
+        retryable_statuses = {429, 500, 502, 503, 504, 529}
+        last_exc: Optional[Exception] = None
+        last_status: Optional[int] = None
+        last_body: str = ""
+
+        for attempt in range(5):
+            try:
                 response = requests.post(
                     "https://api.anthropic.com/v1/messages",
                     headers=headers,
-                    json=data
+                    json=data,
+                    timeout=(10, 120),
                 )
+
+                if response.status_code in retryable_statuses:
+                    last_status = response.status_code
+                    last_body = (response.text or "")[:2000]
+
+                    retry_after = response.headers.get("retry-after")
+                    if retry_after and retry_after.isdigit():
+                        sleep_s = float(retry_after)
+                    else:
+                        sleep_s = min(30.0, 1.5 * (2**attempt))
+
+                    logger.warning(
+                        "Anthropic transient HTTP %s (attempt %s/%s); retrying in %.1fs",
+                        response.status_code,
+                        attempt + 1,
+                        5,
+                        sleep_s,
+                    )
+                    time.sleep(sleep_s)
+                    continue
+
                 response.raise_for_status()
-                result = response.json()["content"][0]["text"]
-            
-            return result
-        
-        except Exception as e:
-            logger.error(f"Error using Anthropic API: {str(e)}")
-            # Return a JSON error response
-            return json.dumps({
-                "id": "polis_narrative_error_message",
-                "title": "Model Error",
-                "paragraphs": [
-                    {
-                        "id": "polis_narrative_error_message",
-                        "title": "Error Processing With Model",
-                        "sentences": [
-                            {
-                                "clauses": [
-                                    {
-                                        "text": f"There was an error using the Anthropic API: {str(e)}",
-                                        "citations": []
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                ]
-            })
+                payload = response.json()
+                return payload["content"][0]["text"]
+
+            except requests.exceptions.RequestException as e:
+                last_exc = e
+                sleep_s = min(30.0, 1.5 * (2**attempt))
+                logger.warning(
+                    "Anthropic request exception (attempt %s/%s): %s; retrying in %.1fs",
+                    attempt + 1,
+                    5,
+                    str(e),
+                    sleep_s,
+                )
+                time.sleep(sleep_s)
+                continue
+            except Exception as e:
+                last_exc = e
+                break
+
+        detail = f"status={last_status} body={last_body}" if last_status else "no_http_status"
+        if last_exc:
+            raise RuntimeError(f"Anthropic API request failed after retries ({detail}): {last_exc}") from last_exc
+        raise RuntimeError(f"Anthropic API request failed after retries ({detail})")
     
     def get_batch_responses(self, batch_requests: List[Dict[str, Any]]) -> Dict[str, Any]:
         """

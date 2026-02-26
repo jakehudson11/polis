@@ -15,6 +15,7 @@ from sqlalchemy.pool import QueuePool
 from sqlalchemy.sql import text
 from typing import Any, Dict, List, Optional
 import boto3
+from boto3.dynamodb.conditions import Attr
 import json
 import logging
 import os
@@ -474,7 +475,11 @@ class JobProcessor:
 
         # This condition handles all actionable states found by find_pending_job.
         # It allows claiming a PENDING job, an AWAITING_RECHECK job, or an expired job.
-        condition_expr = "(#s = :pending OR #s = :awaiting_recheck OR (attribute_exists(lock_expires_at) AND lock_expires_at < :now)) AND #v = :current_version"
+        #
+        # NOTE: Some legacy/malformed items may not have a `version` attribute.
+        # Treat missing version as claimable so the poller can take ownership and
+        # then fail-fast with a clear error instead of spinning on ConditionalCheckFailed.
+        condition_expr = "(#s = :pending OR #s = :awaiting_recheck OR (attribute_exists(lock_expires_at) AND lock_expires_at < :now)) AND (attribute_not_exists(#v) OR #v = :current_version)"
         
         try:
             response = self.table.update_item(
@@ -503,7 +508,7 @@ class JobProcessor:
             
         except ClientError as e:
             if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
-                logger.warning(f"Job {job_id} was claimed by another worker in a race condition. Skipping.")
+                logger.warning(f"Job {job_id} could not be claimed (conditional check failed). Skipping.")
             else:
                 logger.error(f"DynamoDB error claiming job {job_id}: {e}")
             return None
@@ -564,6 +569,347 @@ class JobProcessor:
                 )
         except Exception as e:
             logger.error(f"Failed to release lock for job {job_id}: {e}")
+
+    @staticmethod
+    def _safe_json_loads(raw: Any, default: Any) -> Any:
+        if raw is None:
+            return default
+        if isinstance(raw, (dict, list)):
+            return raw
+        if not isinstance(raw, str) or not raw.strip():
+            return default
+        try:
+            return json.loads(raw)
+        except Exception:
+            return default
+
+    @staticmethod
+    def _coerce_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("1", "true", "t", "yes", "y", "on"):
+                return True
+            if v in ("0", "false", "f", "no", "n", "off"):
+                return False
+        return default
+
+    @staticmethod
+    def _get_stage_config(job_config: Dict[str, Any], stage_name: str) -> Optional[Dict[str, Any]]:
+        """Return the config dict for a stage.
+
+        Returns:
+            - None when the stage does not exist
+            - {} when the stage exists but has no/empty config
+            - dict when the stage exists and has a dict config
+
+        Handles legacy/variant schemas:
+            - job_config['stages'] as a list of stage dicts
+            - job_config['stages'] as a dict keyed by stage name
+            - stage['config'] as dict, empty dict, or JSON string (optionally double-encoded)
+        """
+
+        def _normalize_config(cfg: Any) -> Dict[str, Any]:
+            if cfg is None:
+                return {}
+            if isinstance(cfg, dict):
+                return cfg
+            if isinstance(cfg, str):
+                # Some submitters double-encode JSON; attempt up to two loads.
+                try:
+                    parsed = json.loads(cfg)
+                except Exception:
+                    return {}
+                if isinstance(parsed, str):
+                    try:
+                        parsed2 = json.loads(parsed)
+                        return parsed2 if isinstance(parsed2, dict) else {}
+                    except Exception:
+                        return {}
+                return parsed if isinstance(parsed, dict) else {}
+            return {}
+
+        if not isinstance(job_config, dict):
+            return None
+
+        stages = job_config.get('stages')
+
+        # Preferred schema: stages as list of {stage/name, config}
+        if isinstance(stages, list):
+            for stage in stages:
+                if not isinstance(stage, dict):
+                    continue
+                name = stage.get('stage') or stage.get('name')
+                if name == stage_name:
+                    return _normalize_config(stage.get('config'))
+            return None
+
+        # Alternate schema: stages as dict keyed by stage name.
+        if isinstance(stages, dict):
+            # Direct lookup by stage name.
+            if stage_name in stages:
+                stage_val = stages.get(stage_name)
+                if isinstance(stage_val, dict):
+                    # Some schemas store {config: {...}}; others store the config dict directly.
+                    if 'config' in stage_val:
+                        return _normalize_config(stage_val.get('config'))
+                    return stage_val
+                return _normalize_config(stage_val)
+
+            # Fallback: scan values for a stage dict with matching name.
+            for stage_val in stages.values():
+                if not isinstance(stage_val, dict):
+                    continue
+                name = stage_val.get('stage') or stage_val.get('name')
+                if name == stage_name:
+                    return _normalize_config(stage_val.get('config'))
+            return None
+
+        return None
+
+    def _enqueue_create_narrative_batch_job(
+        self,
+        parent_job: Dict[str, Any],
+        report_stage_config: Dict[str, Any],
+        include_moderation: bool,
+    ) -> Optional[str]:
+        """Enqueue a CREATE_NARRATIVE_BATCH job as a follow-up to a FULL_PIPELINE job."""
+        conversation_id = parent_job.get('conversation_id')
+        if not conversation_id:
+            return None
+
+        # Ensure we always have a stable report_id for DynamoDB keys and URL construction.
+        # Some submitters (e.g., delphi_cli) omit report_id, and some code paths may store it as null.
+        report_id = parent_job.get('report_id') or str(conversation_id)
+
+        model = report_stage_config.get('model') or os.environ.get('ANTHROPIC_MODEL')
+        if not model:
+            self.update_job_logs(parent_job, {
+                'level': 'WARNING',
+                'message': 'REPORT stage requested narratives but no model was provided (missing REPORT.config.model and ANTHROPIC_MODEL). Skipping narrative generation.'
+            })
+            return None
+
+        max_batch_size = report_stage_config.get('max_batch_size')
+        try:
+            max_batch_size = int(max_batch_size) if max_batch_size is not None else None
+        except Exception:
+            max_batch_size = None
+        if not max_batch_size:
+            # Allow override for local/dev without changing API schema
+            env_max = os.environ.get('NARRATIVE_BATCH_MAX_SIZE')
+            try:
+                max_batch_size = int(env_max) if env_max else 20
+            except Exception:
+                max_batch_size = 20
+
+        no_cache = self._coerce_bool(report_stage_config.get('no_cache'), default=False)
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        parent_job_id = parent_job.get('job_id', '')
+        suffix = uuid.uuid4().hex[:8]
+        ts = int(time.time())
+        narrative_job_id = f"auto_narrative_{parent_job_id[:8]}_{ts}_{suffix}"
+
+        job_config = {
+            'job_type': 'CREATE_NARRATIVE_BATCH',
+            'stages': [
+                {
+                    'stage': 'CREATE_NARRATIVE_BATCH_CONFIG_STAGE',
+                    'config': {
+                        'model': model,
+                        'max_batch_size': max_batch_size,
+                        'no_cache': no_cache,
+                        'report_id': report_id,
+                        'include_moderation': include_moderation,
+                    }
+                }
+            ],
+            'parent_job_id': parent_job_id,
+        }
+
+        env_blob = {
+            'NARRATIVE_BATCH_MODEL': str(model),
+            'NARRATIVE_BATCH_MAX_SIZE': str(max_batch_size),
+            'NARRATIVE_BATCH_NO_CACHE': '1' if no_cache else '0',
+        }
+
+        item = {
+            'job_id': narrative_job_id,
+            'status': 'PENDING',
+            'created_at': now_iso,
+            'updated_at': now_iso,
+            'version': 1,
+            'started_at': '',
+            'completed_at': '',
+            'worker_id': 'none',
+            'job_type': 'CREATE_NARRATIVE_BATCH',
+            'priority': int(parent_job.get('priority', 50) or 50),
+            'conversation_id': str(conversation_id),
+            'report_id': report_id,
+            'retry_count': 0,
+            'max_retries': 3,
+            'timeout_seconds': 14400,
+            'job_config': json.dumps(job_config),
+            'job_results': json.dumps({}),
+            'logs': json.dumps({
+                'entries': [
+                    {
+                        'timestamp': now_iso,
+                        'level': 'INFO',
+                        'message': f'Auto-enqueued from FULL_PIPELINE {parent_job_id}'
+                    }
+                ],
+                'log_location': ''
+            }),
+            'created_by': 'poller',
+            'environment': json.dumps(env_blob),
+            'parent_job_id': parent_job_id,
+        }
+
+        try:
+            self.table.put_item(Item=item)
+            self.update_job_logs(parent_job, {
+                'level': 'INFO',
+                'message': f'Enqueued CREATE_NARRATIVE_BATCH follow-up job: {narrative_job_id}'
+            })
+            return narrative_job_id
+        except Exception as e:
+            self.update_job_logs(parent_job, {
+                'level': 'ERROR',
+                'message': f'Failed to enqueue CREATE_NARRATIVE_BATCH follow-up job: {e}'
+            })
+            return None
+
+    def _dynamo_has_any_items(self, table_name: str, conversation_id: Any) -> bool:
+        """Best-effort existence check for any items associated with a conversation.
+
+        This is intentionally defensive about table schemas (string vs numeric ids, zid vs conversation_id).
+        Returns False on any error.
+        """
+        try:
+            table = self.dynamodb.Table(table_name)
+        except Exception as e:
+            logger.warning(f"Unable to open DynamoDB table {table_name}: {e}")
+            return False
+
+        cid_str = str(conversation_id)
+        cid_int: Optional[int]
+        try:
+            cid_int = int(conversation_id)
+        except Exception:
+            cid_int = None
+
+        # Scan with a filter so we don't depend on the table's key schema.
+        try:
+            conditions = [
+                Attr('conversation_id').eq(cid_str),
+                Attr('zid').eq(cid_str),
+            ]
+            if cid_int is not None:
+                conditions.extend([
+                    Attr('conversation_id').eq(cid_int),
+                    Attr('zid').eq(cid_int),
+                ])
+
+            filter_expr = None
+            for cond in conditions:
+                filter_expr = cond if filter_expr is None else (filter_expr | cond)
+
+            resp = table.scan(Limit=1, FilterExpression=filter_expr)
+            return bool(resp.get('Count', 0))
+        except Exception as e:
+            logger.warning(f"Error scanning DynamoDB table {table_name} for conversation_id={cid_str}: {e}")
+            return False
+
+    def _run_topic_hierarchy(
+        self,
+        job: Dict[str, Any],
+        conversation_id: Any,
+        job_id: Any,
+        report_id: Any,
+        app_path: str,
+    ) -> bool:
+        """Run 751_topic_hierarchy as a best-effort pre-step before narrative generation.
+
+        - Only runs if prerequisites exist in DynamoDB.
+        - Streams stdout/stderr to update_job_logs.
+        - Never raises; returns True on success, False otherwise.
+        """
+        try:
+            topic_names_ok = self._dynamo_has_any_items('Delphi_CommentClustersLLMTopicNames', conversation_id)
+            assignments_ok = self._dynamo_has_any_items('Delphi_CommentHierarchicalClusterAssignments', conversation_id)
+
+            if not (topic_names_ok and assignments_ok):
+                msg = (
+                    "Skipping topic hierarchy (751_topic_hierarchy): prerequisites missing "
+                    f"(Delphi_CommentClustersLLMTopicNames={topic_names_ok}, "
+                    f"Delphi_CommentHierarchicalClusterAssignments={assignments_ok})."
+                )
+                logger.info(msg)
+                self.update_job_logs(job, {'level': 'INFO', 'message': msg})
+                return False
+
+            cmd = [
+                sys.executable,
+                '/app/umap_narrative/751_topic_hierarchy.py',
+                '--conversation_id', str(conversation_id),
+                '--job_id', str(job_id),
+                '--report_id', str(report_id),
+            ]
+
+            self.update_job_logs(job, {'level': 'INFO', 'message': f"Executing topic hierarchy: {' '.join(cmd)}"})
+
+            env = os.environ.copy()
+            env['DELPHI_JOB_ID'] = str(job_id)
+            env['DELPHI_REPORT_ID'] = str(report_id)
+
+            # Ensure the Delphi app root is on PYTHONPATH for module execution.
+            existing_pp = env.get('PYTHONPATH', '')
+            env['PYTHONPATH'] = f"{app_path}{os.pathsep}{existing_pp}" if existing_pp else str(app_path)
+
+            timeout_seconds = int(job.get('timeout_seconds', 3600) or 3600)
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                env=env,
+            )
+
+            start_time = time.time()
+            for line in iter(process.stdout.readline, ''):
+                self.update_job_logs(job, {'level': 'INFO', 'message': f"[topic_hierarchy] {line.strip()}"})
+                if time.time() - start_time > timeout_seconds:
+                    raise subprocess.TimeoutExpired(cmd, timeout_seconds)
+
+            process.stdout.close()
+            return_code = process.wait()
+            if return_code == 0:
+                self.update_job_logs(job, {'level': 'INFO', 'message': 'Topic hierarchy completed successfully.'})
+                return True
+
+            warn_msg = f"Topic hierarchy failed with exit code {return_code}; continuing to narrative enqueue."
+            logger.warning(warn_msg)
+            self.update_job_logs(job, {'level': 'WARNING', 'message': warn_msg})
+            return False
+        except subprocess.TimeoutExpired:
+            warn_msg = 'Topic hierarchy timed out; continuing to narrative enqueue.'
+            logger.warning(warn_msg)
+            self.update_job_logs(job, {'level': 'WARNING', 'message': warn_msg})
+            return False
+        except Exception as e:
+            warn_msg = f"Topic hierarchy encountered an error ({e}); continuing to narrative enqueue."
+            logger.warning(warn_msg, exc_info=True)
+            self.update_job_logs(job, {'level': 'WARNING', 'message': warn_msg})
+            return False
             
     def update_job_logs(self, job, log_entry, mirror_to_console=True):
         """
@@ -571,7 +917,19 @@ class JobProcessor:
         """
         try:
             # Get current logs and version
-            current_logs = json.loads(job.get('logs', '{"entries":[]}'))
+            raw_logs = job.get('logs')
+            if isinstance(raw_logs, dict):
+                current_logs = raw_logs
+            elif isinstance(raw_logs, str) and raw_logs.strip():
+                try:
+                    current_logs = json.loads(raw_logs)
+                except Exception:
+                    current_logs = {'entries': []}
+            else:
+                current_logs = {'entries': []}
+
+            if not isinstance(current_logs, dict):
+                current_logs = {'entries': []}
             if 'entries' not in current_logs:
                 current_logs['entries'] = []
             
@@ -667,25 +1025,98 @@ class JobProcessor:
         conversation_id = job.get('conversation_id')
         timeout_seconds = int(job.get('timeout_seconds', 3600))
 
+        if not conversation_id:
+            self.complete_job(job, False, error="Malformed job schema: missing conversation_id")
+            return
+
+        if not job_type:
+            self.complete_job(job, False, error="Malformed job schema: missing job_type")
+            return
+
         self.update_job_logs(job, {'level': 'INFO', 'message': f'Worker {self.worker_id} starting job {job_id}'})
         
         try:
             # 1. Build the command
-            job_config = json.loads(job.get('job_config', '{}'))
-            include_moderation = job_config.get('include_moderation', False)
+            job_config = self._safe_json_loads(job.get('job_config', '{}'), {})
+            job_environment = self._safe_json_loads(job.get('environment', '{}'), {})
+
+            if os.getenv('DELPHI_CONFIG_DEBUG') == '1':
+                raw_job_config = job.get('job_config')
+                raw_job_config_size = None
+                try:
+                    raw_job_config_size = len(raw_job_config) if hasattr(raw_job_config, '__len__') else None
+                except Exception:
+                    raw_job_config_size = None
+
+                logger.info(f"[DEBUG] raw job_config type: {type(raw_job_config)}, size: {raw_job_config_size}")
+                logger.info(f"[DEBUG] parsed job_config type: {type(job_config)}")
+                if isinstance(job_config, dict):
+                    logger.info(f"[DEBUG] job_config keys: {sorted(job_config.keys())}")
+                    stages_value = job_config.get('stages')
+                    logger.info(f"[DEBUG] stages type: {type(stages_value)}")
+                    if isinstance(stages_value, list):
+                        stage_names = []
+                        for stage in stages_value:
+                            if isinstance(stage, dict):
+                                stage_names.append(stage.get('stage') or stage.get('name'))
+                            else:
+                                stage_names.append(type(stage).__name__)
+                        logger.info(f"[DEBUG] stages names: {stage_names}")
+
+                    wants_report_legacy = job_config.get('wants_report')
+                    include_topics_legacy = job_config.get('include_topics')
+                    logger.info(
+                        f"[DEBUG] legacy wants_report: {wants_report_legacy} ({type(wants_report_legacy)}), "
+                        f"include_topics: {include_topics_legacy} ({type(include_topics_legacy)})"
+                    )
+                else:
+                    logger.info("[DEBUG] job_config is not a dict; key/stage/legacy summaries skipped")
+
+            include_moderation = self._coerce_bool(job_config.get('include_moderation', False), default=False)
             app_path = os.environ.get('DELPHI_APP_PATH', '/app')
             if job_type == 'CREATE_NARRATIVE_BATCH':
-                model = os.environ.get("ANTHROPIC_MODEL")
-                if not model: raise ValueError("ANTHROPIC_MODEL must be set")
-                max_batch_size = job_config.get('max_batch_size', 20)
-                cmd = ['python', f'{app_path}/umap_narrative/801_narrative_report_batch.py', f'--conversation_id={conversation_id}', f'--model={model}', f'--include_moderation={include_moderation}', f'--max-batch-size={str(max_batch_size)}']
-                if job_config.get('no_cache'): cmd.append('--no-cache')
+                stage_cfg = self._get_stage_config(job_config, 'CREATE_NARRATIVE_BATCH_CONFIG_STAGE') or {}
+                stage_model = stage_cfg.get('model')
+                env_model = job_environment.get('NARRATIVE_BATCH_MODEL')
+                model = stage_model or env_model or job_config.get('model') or os.environ.get("ANTHROPIC_MODEL")
+                if not model:
+                    raise ValueError("Model not specified for CREATE_NARRATIVE_BATCH (missing job_config stage config, environment.NARRATIVE_BATCH_MODEL, and ANTHROPIC_MODEL)")
+
+                max_batch_size = stage_cfg.get('max_batch_size', job_config.get('max_batch_size'))
+                if max_batch_size is None:
+                    env_max = job_environment.get('NARRATIVE_BATCH_MAX_SIZE')
+                    max_batch_size = env_max if env_max is not None else 20
+                max_batch_size = int(max_batch_size)
+
+                no_cache = stage_cfg.get('no_cache', job_config.get('no_cache'))
+                if no_cache is None:
+                    no_cache = job_environment.get('NARRATIVE_BATCH_NO_CACHE')
+                no_cache = self._coerce_bool(no_cache, default=False)
+
+                include_moderation = self._coerce_bool(
+                    stage_cfg.get('include_moderation', include_moderation),
+                    default=include_moderation,
+                )
+
+                cmd = [
+                    'python',
+                    f'{app_path}/umap_narrative/801_narrative_report_batch.py',
+                    f'--conversation_id={conversation_id}',
+                    f'--model={model}',
+                    f'--max-batch-size={str(max_batch_size)}',
+                ]
+                if include_moderation:
+                    cmd.append('--include_moderation')
+                if no_cache:
+                    cmd.append('--no-cache')
             elif job_type == 'AWAITING_NARRATIVE_BATCH':
                 cmd_job_id = job.get('batch_job_id', job_id)
                 cmd = ['python', f'{app_path}/umap_narrative/803_check_batch_status.py', f'--job-id={cmd_job_id}']
             else: # FULL_PIPELINE
                 # Base command
-                cmd = ['python', f'{app_path}/run_delphi.py', f'--zid={conversation_id}', f'--include_moderation={include_moderation}',]
+                cmd = ['python', f'{app_path}/run_delphi.py', f'--zid={conversation_id}']
+                if include_moderation:
+                    cmd.append('--include_moderation')
                 # Check for report_id and append if it exists
                 report_id = job.get('report_id')
                 if report_id:
@@ -698,7 +1129,7 @@ class JobProcessor:
             
             env = os.environ.copy()
             env['DELPHI_JOB_ID'] = job_id
-            env['DELPHI_REPORT_ID'] = str(job.get('report_id', conversation_id))
+            env['DELPHI_REPORT_ID'] = str(job.get('report_id') or conversation_id)
             
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True, env=env)
 
@@ -728,6 +1159,70 @@ class JobProcessor:
                     self.complete_job(job, False, error=f"CREATE_NARRATIVE_BATCH script failed with exit code {return_code}")
 
             else: # Handle all other synchronous job types
+                # If a FULL_PIPELINE job requested a REPORT stage, enqueue narrative generation as a follow-up job.
+                if success and job_type == 'FULL_PIPELINE':
+                    logger.info("Checking if narrative generation should be enqueued...")
+                    report_stage_cfg = self._get_stage_config(job_config, 'REPORT')
+                    has_report_stage = report_stage_cfg is not None
+                    top_level_wants_report = self._coerce_bool(job_config.get('wants_report', False), default=False)
+                    top_level_include_topics = self._coerce_bool(job_config.get('include_topics', True), default=True)
+
+                    if has_report_stage:
+                        # Stage presence usually means REPORT was requested, but honor explicit false if provided.
+                        report_cfg = report_stage_cfg or {}
+                        wants_report_raw = report_cfg.get('wants_report', True)
+                        wants_report = self._coerce_bool(wants_report_raw, default=True)
+                        include_topics_raw = report_cfg.get('include_topics', True)
+                        include_topics = self._coerce_bool(include_topics_raw, default=True)
+                    else:
+                        # Legacy compatibility: top-level flags when no stages[] schema is present.
+                        wants_report = top_level_wants_report
+                        if wants_report:
+                            include_topics_raw = job_config.get('include_topics', True)
+                            include_topics = top_level_include_topics
+                        else:
+                            include_topics_raw = None
+                            include_topics = False
+
+                    # Extra safety for mixed payloads: top-level wants_report=true should still enable report flow.
+                    if top_level_wants_report:
+                        wants_report = True
+                        if include_topics_raw is None:
+                            include_topics_raw = job_config.get('include_topics', True)
+                            include_topics = top_level_include_topics
+
+                    if os.getenv('DELPHI_CONFIG_DEBUG') == '1':
+                        logger.info(f"[DEBUG] REPORT stage detected: {has_report_stage}")
+                        logger.info(f"[DEBUG] wants_report (computed): {wants_report}")
+                        logger.info(
+                            f"[DEBUG] include_topics raw: {include_topics_raw} ({type(include_topics_raw)}), "
+                            f"coerced: {include_topics}"
+                        )
+                        logger.info(
+                            f"[DEBUG] gate wants_report/include_topics: wants_report={wants_report}, include_topics={include_topics}"
+                        )
+                    logger.info(f"wants_report: {wants_report}, include_topics: {include_topics}")
+                    if wants_report and include_topics:
+                        logger.info("Enqueueing narrative batch job...")
+
+                        # Best-effort: build the topic hierarchy before enqueueing narratives.
+                        # Failures must not block narrative generation.
+                        report_id_for_hierarchy = job.get('report_id') or str(conversation_id)
+                        self._run_topic_hierarchy(
+                            job=job,
+                            conversation_id=conversation_id,
+                            job_id=job_id,
+                            report_id=report_id_for_hierarchy,
+                            app_path=app_path,
+                        )
+
+                        narrative_job_id = self._enqueue_create_narrative_batch_job(
+                            parent_job=job,
+                            report_stage_config=report_stage_cfg or {},
+                            include_moderation=include_moderation,
+                        )
+                        logger.info(f"Enqueued narrative job: {narrative_job_id}")
+
                 self.complete_job(job, success, error=f"Process exited with code {return_code}" if not success else None)
 
         except subprocess.TimeoutExpired:

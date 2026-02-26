@@ -27,12 +27,13 @@ from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 from umap import UMAP
 
+from llm_factory_constructor.model_provider import get_model_provider
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
 
 def setup_environment(
     db_host=None, db_port=None, db_name=None, db_user=None, db_password=None
@@ -282,7 +283,7 @@ def generate_cluster_topic_labels(
     layer=None,
     layer_idx=0,
     conversation_name=None,
-    use_ollama=False,
+    enable_llm_topic_naming=False,
     document_map=None,
 ):
     """
@@ -290,64 +291,88 @@ def generate_cluster_topic_labels(
 
     Args:
         cluster_characteristics: Dictionary with cluster characterizations
-        comment_texts: List of comment text strings (used for Ollama naming)
-        layer: Cluster assignments for the current layer (used for Ollama naming)
+        comment_texts: List of comment text strings (used for LLM topic naming)
+        layer: Cluster assignments for the current layer (used for LLM topic naming)
         layer_idx: Index of the current layer
-        conversation_name: Name of the conversation (used for Ollama naming)
-        use_ollama: Whether to use Ollama for topic naming
+        conversation_name: Name of the conversation (used for topic naming)
+        enable_llm_topic_naming: Whether to use an LLM (Anthropic) for topic naming
         document_map: 2D UMAP coordinates for selecting representative comments
 
     Returns:
         cluster_labels: Dictionary mapping cluster IDs to topic labels
     """
     cluster_labels = {}
+    llm_stats = {
+        "attempted": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
 
-    # Check for Anthropic API key
-    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not anthropic_api_key:
-        warning_message = (
-            "⚠️ ANTHROPIC_API_KEY not set. LLM-based narrative reports will be skipped."
-        )
-        logger.warning(warning_message)
-        # Print to stdout directly for better visibility in Docker logs
-        print(f"\033[0;33m{warning_message}\033[0m")
-        print(
-            "To generate narrative reports, set the ANTHROPIC_API_KEY environment variable."
-        )
+    def _get_conventional_label(cluster_id, characteristics) -> str:
+        top_words = characteristics.get("top_words", [])
+        sample_comments = characteristics.get("sample_comments", [])
 
-    # Check if we should use Ollama
-    if use_ollama and comment_texts is not None and layer is not None:
-        try:
-            import ollama
+        label_parts = []
 
-            logger.info("Using Ollama for cluster naming")
+        if len(top_words) > 0:
+            label_parts.append("Keywords: " + ", ".join(top_words[:5]))
 
-            # Function to get topic labels via Ollama
-            def get_topic_name(comments):
-                prompt = (
-                    "Read these comments and provide ONLY ONE short topic label (3–5 words) "
-                    "that captures their combined essence. Do not give one topic per comment. "
-                    "Do not include explanations, introductions, or multiple outputs. "
-                    "Reply with exactly one topic label, in quotation marks, on a single line.\n\n"
-                    "Comments:\n"
-                )
-                for j, comment in enumerate(
-                    comments[:5]
-                ):  # Use 5 pseudo-random comments as examples
-                    prompt += f"{j + 1}. {comment}\n"
+        if len(sample_comments) > 0:
+            first_comment = sample_comments[0]
+            if len(first_comment) > 50:
+                first_comment = first_comment[:47] + "..."
+            label_parts.append("Example: " + first_comment)
 
-                try:
-                    # Get model name from environment variable or use default
-                    model_name = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
-                    logger.info(f"Using Ollama model from environment: {model_name}")
-                    response = ollama.chat(
-                        model=model_name, messages=[{"role": "user", "content": prompt}]
-                    )
+        if label_parts:
+            label = " | ".join(label_parts)
+            if len(label) > 50:
+                label = label[:47] + "..."
+            return label
+        return f"Topic {cluster_id}"
 
-                    # Extract just the topic name with more thorough cleaning
-                    raw_response = response["message"]["content"].strip()
+    # LLM topic naming via Anthropic
+    if enable_llm_topic_naming and comment_texts is not None and layer is not None:
+        anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+        anthropic_model = os.environ.get("ANTHROPIC_MODEL")
 
-                    # Clean up various prefixes - extended list from 600_generate_llm_topic_names.py
+        if not anthropic_api_key:
+            logger.warning(
+                "Topic naming skipped (non-blocking): ANTHROPIC_API_KEY not set. Using conventional topic naming."
+            )
+            llm_stats["skipped"] += 1
+        elif not anthropic_model:
+            logger.warning(
+                "Topic naming skipped (non-blocking): ANTHROPIC_MODEL not set. Using conventional topic naming."
+            )
+            llm_stats["skipped"] += 1
+        else:
+            try:
+                provider = get_model_provider("anthropic", model_name=anthropic_model)
+                logger.info("Using Anthropic for cluster naming")
+
+                def _is_provider_error_payload(text: str) -> bool:
+                    """Detect the provider's structured JSON error payload."""
+                    if not text:
+                        return False
+                    t = text.strip()
+                    if not (t.startswith("{") and "polis_narrative_error_message" in t):
+                        return False
+                    try:
+                        parsed = json.loads(t)
+                    except Exception:
+                        return False
+                    return parsed.get("id") == "polis_narrative_error_message"
+
+                def _looks_like_overload(text: str) -> bool:
+                    t = (text or "").lower()
+                    return ("529" in t) or ("overloaded" in t) or ("rate" in t and "limit" in t)
+
+                def _clean_topic_label(raw_text: str) -> str:
+                    raw_text = (raw_text or "").strip()
+                    if not raw_text:
+                        return ""
+
                     prefixes_to_remove = [
                         "Here is the list of topic labels:",
                         "Here is the list of topic labels",
@@ -368,141 +393,132 @@ def generate_cluster_topic_labels(
                         "Label",
                     ]
 
-                    # First, check if there's already a layer_cluster prefix (like "1_2:") and remove it
                     import re
 
-                    layer_prefix_match = re.match(r"^\d+_\d+:\s*", raw_response)
+                    layer_prefix_match = re.match(r"^\d+_\d+:\s*", raw_text)
                     if layer_prefix_match:
-                        raw_response = raw_response[layer_prefix_match.end() :]
+                        raw_text = raw_text[layer_prefix_match.end() :]
 
                     for prefix in prefixes_to_remove:
-                        if raw_response.startswith(prefix):
-                            raw_response = raw_response.replace(prefix, "", 1)
+                        if raw_text.startswith(prefix):
+                            raw_text = raw_text.replace(prefix, "", 1)
 
-                    # Strip all whitespace including newlines BEFORE splitting
-                    raw_response = raw_response.strip()
-
-                    # Get just the first line, as we only want the label
-                    topic = raw_response.split("\n")[0].strip()
-
-                    # Remove quotes if they're present (handle both double and single quotes)
+                    raw_text = raw_text.strip()
+                    topic = raw_text.split("\n")[0].strip()
                     topic = topic.strip("\"'")
 
-                    # Remove common formats like "1. Topic Name" or "- Topic Name"
                     if topic.startswith("1. ") or topic.startswith("- "):
                         topic = topic[3:].strip()
 
-                    # Remove asterisks and other markdown formatting
                     topic = topic.replace("*", "")
-
-                    # Check if we ended up with empty string after all the cleaning
-                    if not topic or not topic.strip():
-                        logger.warning(
-                            f"Empty topic name after cleaning for cluster - original response: '{raw_response}'"
-                        )
-                        return f"Topic {len(comments)}"  # Fallback
-                    if len(topic) > 50:  # If it's too long, truncate
+                    if len(topic) > 50:
                         topic = topic[:50] + "..."
-                    return topic
-                except Exception as e:
-                    logger.error(f"Error generating topic with Ollama: {e}")
-                    return f"Topic {len(comments)}"
+                    return topic.strip()
 
-            # Generate labels using Ollama
-            for cluster_id in cluster_characteristics.keys():
-                if cluster_id < 0:  # Skip noise points
-                    continue
-
-                # Get comments for this cluster
-                cluster_indices = np.where(layer == cluster_id)[0]
-
-                # Select the 5 most representative comments (closest to centroid)
-                if len(cluster_indices) > 5 and document_map is not None:
-                    # Calculate centroid of the cluster in document_map space
-                    centroid = np.mean(document_map[cluster_indices], axis=0)
-
-                    # Calculate distance from each comment to the centroid
-                    distances = np.sqrt(
-                        np.sum((document_map[cluster_indices] - centroid) ** 2, axis=1)
+                def get_topic_name(comments, fallback_characteristics, cluster_id: int) -> str:
+                    prompt = (
+                        "Read these comments and provide ONLY ONE short topic label (3–5 words) "
+                        "that captures their combined essence. Do not give one topic per comment. "
+                        "Do not include explanations, introductions, or multiple outputs. "
+                        "Reply with exactly one topic label, in quotation marks, on a single line.\n\n"
+                        "Comments:\n"
                     )
+                    for j, comment in enumerate(comments[:5]):
+                        prompt += f"{j + 1}. {comment}\n"
 
-                    # Get indices of the 5 comments closest to centroid
-                    closest_indices = np.argsort(distances)[:5]
-                    selected_indices = cluster_indices[closest_indices].tolist()
+                    try:
+                        llm_stats["attempted"] += 1
 
-                    logger.info(
-                        f"Selected {len(selected_indices)} most representative comments "
-                        f"for layer {layer_idx}, cluster {cluster_id} "
-                        f"(distances: {distances[closest_indices]})"
+                        raw_response = provider.get_response(
+                            system_message="",
+                            user_message=prompt,
+                        )
+
+                        # Defensive check for legacy behavior where providers returned a structured JSON blob.
+                        if _is_provider_error_payload(raw_response):
+                            raise RuntimeError(
+                                f"Anthropic provider returned error payload for layer {layer_idx} cluster {cluster_id}"
+                            )
+
+                        topic = _clean_topic_label(raw_response)
+                        if not topic:
+                            logger.warning(
+                                "Empty topic name after cleaning for layer %s cluster %s; falling back to conventional label",
+                                layer_idx,
+                                cluster_id,
+                            )
+                            llm_stats["failed"] += 1
+                            return _get_conventional_label(cluster_id, fallback_characteristics)
+                        llm_stats["succeeded"] += 1
+                        return topic
+                    except Exception as e:
+                        logger.warning(
+                            "Topic naming failed via Anthropic: %s",
+                            e,
+                        )
+                        logger.debug(
+                            "Anthropic topic naming exception details:\n%s",
+                            traceback.format_exc(),
+                        )
+                        llm_stats["failed"] += 1
+                        return _get_conventional_label(cluster_id, fallback_characteristics)
+
+                for cluster_id, characteristics in cluster_characteristics.items():
+                    if cluster_id < 0:
+                        continue
+
+                    cluster_indices = np.where(layer == cluster_id)[0]
+
+                    if len(cluster_indices) > 5 and document_map is not None:
+                        centroid = np.mean(document_map[cluster_indices], axis=0)
+                        distances = np.sqrt(
+                            np.sum((document_map[cluster_indices] - centroid) ** 2, axis=1)
+                        )
+                        closest_indices = np.argsort(distances)[:5]
+                        selected_indices = cluster_indices[closest_indices].tolist()
+                        logger.info(
+                            "Selected %s most representative comments for layer %s, cluster %s",
+                            len(selected_indices),
+                            layer_idx,
+                            cluster_id,
+                        )
+                    else:
+                        selected_indices = cluster_indices.tolist()
+
+                    selected_comments = [comment_texts[i] for i in selected_indices]
+                    topic_name = get_topic_name(selected_comments, characteristics, cluster_id)
+
+                    cleaned_topic_name = (topic_name or "").strip().strip("\"'")
+                    prefixed_topic_name = (
+                        f"{layer_idx}_{cluster_id}: {cleaned_topic_name}"
+                        if cleaned_topic_name
+                        else f"{layer_idx}_{cluster_id}:"
                     )
-                else:
-                    # If 5 or fewer comments, use all of them
-                    selected_indices = cluster_indices.tolist()
+                    cluster_labels[cluster_id] = prefixed_topic_name
 
-                selected_comments = [comment_texts[i] for i in selected_indices]
+                    time.sleep(0.5)
 
-                # Get topic name
-                topic_name = get_topic_name(
-                    selected_comments,
-                )
-                # Add layer_cluster prefix to ensure uniqueness
-                # Use the passed layer_idx parameter, not the layer array
                 logger.info(
-                    f"DEBUG: Creating prefix for layer_idx={layer_idx}, cluster_id={cluster_id}, topic='{topic_name}'"
+                    "Generated %s topic names using Anthropic",
+                    len(cluster_labels),
                 )
-                # Strip quotes again in case they were added back somehow
-                cleaned_topic_name = topic_name.strip().strip("\"'")
-                prefixed_topic_name = (
-                    f"{layer_idx}_{cluster_id}: {cleaned_topic_name}"
-                    if cleaned_topic_name
-                    else f"{layer_idx}_{cluster_id}:"
+                return cluster_labels, llm_stats
+
+            except Exception as e:
+                logger.warning(
+                    "Topic naming failed (non-blocking) using Anthropic: %s. Using conventional topic naming.",
+                    e,
                 )
-                logger.info(f"DEBUG: Final prefixed name: '{prefixed_topic_name}'")
-                cluster_labels[cluster_id] = prefixed_topic_name
+                logger.debug(
+                    "Anthropic exception details:\n%s",
+                    traceback.format_exc(),
+                )
 
-                # Sleep briefly to avoid rate limiting
-                time.sleep(0.5)
-
-            logger.info(f"Generated {len(cluster_labels)} topic names using Ollama")
-            return cluster_labels
-
-        except ImportError:
-            logger.error("Ollama not installed. Using conventional topic naming.")
-            # Fall back to conventional naming
-        except Exception as e:
-            logger.error(f"Error using Ollama: {e}")
-            # Fall back to conventional naming
-
-    # Conventional topic naming (fallback or when Ollama is not requested)
+    # Conventional topic naming (fallback or when LLM naming is not requested)
     for cluster_id, characteristics in cluster_characteristics.items():
-        top_words = characteristics.get("top_words", [])
-        sample_comments = characteristics.get("sample_comments", [])
+        cluster_labels[cluster_id] = _get_conventional_label(cluster_id, characteristics)
 
-        label_parts = []
-
-        # Add top words
-        if len(top_words) > 0:
-            label_parts.append("Keywords: " + ", ".join(top_words[:5]))
-
-        # Add first sample comment (shortened)
-        if len(sample_comments) > 0:
-            first_comment = sample_comments[0]
-            if len(first_comment) > 50:
-                first_comment = first_comment[:47] + "..."
-            label_parts.append("Example: " + first_comment)
-
-        # Create the final label
-        if label_parts:
-            label = " | ".join(label_parts)
-            # Truncate if too long
-            if len(label) > 50:
-                label = label[:47] + "..."
-        else:
-            label = f"Topic {cluster_id}"
-
-        cluster_labels[cluster_id] = label
-
-    return cluster_labels
+    return cluster_labels, llm_stats
 
 
 def create_comment_hover_info(cluster_layer, cluster_characteristics, comment_texts):
@@ -565,12 +581,44 @@ def create_basic_layer_visualization(
     Returns:
         file_path: Path to the saved visualization
     """
+    data_map_array = np.asarray(data_map)
+    cluster_layer_array = np.asarray(cluster_layer)
+
+    if data_map_array.ndim != 2 or data_map_array.shape[0] == 0:
+        logger.warning(
+            "Skipping basic visualization %s due to empty/invalid data_map shape: %s",
+            file_prefix,
+            getattr(data_map_array, "shape", None),
+        )
+        return None
+
+    expected_len = data_map_array.shape[0]
+    if len(cluster_layer_array) != expected_len or len(hover_info) != expected_len:
+        trunc_len = min(expected_len, len(cluster_layer_array), len(hover_info))
+        logger.warning(
+            "Input length mismatch for %s (map=%s, clusters=%s, hover=%s). Truncating to %s.",
+            file_prefix,
+            expected_len,
+            len(cluster_layer_array),
+            len(hover_info),
+            trunc_len,
+        )
+        if trunc_len <= 0:
+            logger.warning("Skipping basic visualization %s due to no usable points.", file_prefix)
+            return None
+        data_map_array = data_map_array[:trunc_len]
+        cluster_layer_array = cluster_layer_array[:trunc_len]
+        hover_info = hover_info[:trunc_len]
+
     # Create labels vector
     labels_for_viz = np.array(
         [
-            cluster_labels.get(label, "Unlabelled") if label >= 0 else "Unlabelled"
-            for label in cluster_layer
-        ]
+            cluster_labels.get(int(label), f"Topic {int(label)}")
+            if int(label) >= 0
+            else "Unlabelled"
+            for label in cluster_layer_array
+        ],
+        dtype=object,
     )
 
     # Create interactive visualization
@@ -579,7 +627,7 @@ def create_basic_layer_visualization(
 
     try:
         interactive_figure = datamapplot.create_interactive_plot(
-            data_map,
+            data_map_array,
             labels_for_viz,
             hover_text=hover_info,
             title=title,
@@ -595,8 +643,34 @@ def create_basic_layer_visualization(
         logger.info(f"Saved basic visualization to {viz_file}")
         return viz_file
     except Exception as e:
-        logger.error(f"Error creating basic visualization: {e}")
-        return None
+        logger.warning(
+            "Basic visualization failed for %s (%s); retrying with per-point fallback labels.",
+            file_prefix,
+            e,
+        )
+        try:
+            fallback_labels = np.array(
+                [f"Point {idx}" for idx in range(len(data_map_array))], dtype=object
+            )
+            interactive_figure = datamapplot.create_interactive_plot(
+                data_map_array,
+                fallback_labels,
+                hover_text=hover_info,
+                title=title,
+                sub_title=sub_title,
+                point_radius_min_pixels=2,
+                point_radius_max_pixels=10,
+                width="100%",
+                height=800,
+            )
+            interactive_figure.save(viz_file)
+            logger.info(
+                "Saved basic visualization to %s using fallback labels", viz_file
+            )
+            return viz_file
+        except Exception as retry_err:
+            logger.error(f"Error creating basic visualization after retry: {retry_err}")
+            return None
 
 
 def create_named_layer_visualization(
@@ -625,12 +699,44 @@ def create_named_layer_visualization(
     Returns:
         file_path: Path to the saved visualization
     """
+    data_map_array = np.asarray(data_map)
+    cluster_layer_array = np.asarray(cluster_layer)
+
+    if data_map_array.ndim != 2 or data_map_array.shape[0] == 0:
+        logger.warning(
+            "Skipping named visualization %s due to empty/invalid data_map shape: %s",
+            file_prefix,
+            getattr(data_map_array, "shape", None),
+        )
+        return None
+
+    expected_len = data_map_array.shape[0]
+    if len(cluster_layer_array) != expected_len or len(hover_info) != expected_len:
+        trunc_len = min(expected_len, len(cluster_layer_array), len(hover_info))
+        logger.warning(
+            "Input length mismatch for %s (map=%s, clusters=%s, hover=%s). Truncating to %s.",
+            file_prefix,
+            expected_len,
+            len(cluster_layer_array),
+            len(hover_info),
+            trunc_len,
+        )
+        if trunc_len <= 0:
+            logger.warning("Skipping named visualization %s due to no usable points.", file_prefix)
+            return None
+        data_map_array = data_map_array[:trunc_len]
+        cluster_layer_array = cluster_layer_array[:trunc_len]
+        hover_info = hover_info[:trunc_len]
+
     # Create labels vector
     labels_for_viz = np.array(
         [
-            cluster_labels.get(label, "Unlabelled") if label >= 0 else "Unlabelled"
-            for label in cluster_layer
-        ]
+            cluster_labels.get(int(label), f"Topic {int(label)}")
+            if int(label) >= 0
+            else "Unlabelled"
+            for label in cluster_layer_array
+        ],
+        dtype=object,
     )
 
     # Create interactive visualization
@@ -639,7 +745,7 @@ def create_named_layer_visualization(
 
     try:
         interactive_figure = datamapplot.create_interactive_plot(
-            data_map,
+            data_map_array,
             labels_for_viz,
             hover_text=hover_info,
             title=title,
@@ -655,8 +761,34 @@ def create_named_layer_visualization(
         logger.info(f"Saved named visualization to {viz_file}")
         return viz_file
     except Exception as e:
-        logger.error(f"Error creating named visualization: {e}")
-        return None
+        logger.warning(
+            "Named visualization failed for %s (%s); retrying with per-point fallback labels.",
+            file_prefix,
+            e,
+        )
+        try:
+            fallback_labels = np.array(
+                [f"Point {idx}" for idx in range(len(data_map_array))], dtype=object
+            )
+            interactive_figure = datamapplot.create_interactive_plot(
+                data_map_array,
+                fallback_labels,
+                hover_text=hover_info,
+                title=title,
+                sub_title=sub_title,
+                point_radius_min_pixels=2,
+                point_radius_max_pixels=10,
+                width="100%",
+                height=800,
+            )
+            interactive_figure.save(viz_file)
+            logger.info(
+                "Saved named visualization to %s using fallback labels", viz_file
+            )
+            return viz_file
+        except Exception as retry_err:
+            logger.error(f"Error creating named visualization after retry: {retry_err}")
+            return None
 
 
 def process_layers_and_store_characteristics(
@@ -1049,7 +1181,7 @@ def process_layers_and_create_visualizations(
     cluster_layers,
     comment_texts,
     output_dir,
-    use_ollama=False,
+    enable_llm_topic_naming=False,
     dynamo_storage=None,
     job_id=None,  # Added job_id
 ):
@@ -1063,7 +1195,7 @@ def process_layers_and_create_visualizations(
         cluster_layers: Cluster assignments for each layer
         comment_texts: List of comment text strings
         output_dir: Directory to save visualizations
-        use_ollama: Whether to use Ollama for topic naming (deprecated, will be moved to separate script)
+        enable_llm_topic_naming: Whether to use LLM (Anthropic) for topic naming
         dynamo_storage: Optional DynamoDBStorage object for storing in DynamoDB
         job_id: Job ID for this run
     """
@@ -1088,59 +1220,90 @@ def process_layers_and_create_visualizations(
         layer_data=layer_data,
     )
 
-    # If Ollama is requested, warn that this is deprecated
-    if use_ollama:
-        logger.warning(
-            "Ollama topic naming is moving to a separate process to improve reliability. "
-            "Use the new update_with_ollama.py script to update topic names with LLM after processing."
-        )
+    # LLM topic naming
+    # If enabled, treat "0 successful LLM labels" as a hard failure. This prevents jobs from being
+    # marked COMPLETED when the LLM returns overload/error placeholders for every cluster.
+    strict_llm = os.environ.get("DELPHI_STRICT_LLM", "0").strip().lower() not in ("0", "false", "no")
 
-        # For backward compatibility, still run with Ollama if requested
+    if enable_llm_topic_naming:
+        total_llm_succeeded = 0
+        total_llm_attempted = 0
+        total_clusters = 0
         for layer_idx, cluster_layer in enumerate(cluster_layers):
-            characteristics = layer_data[layer_idx]["characteristics"]
+            try:
+                characteristics = layer_data[layer_idx]["characteristics"]
 
-            # Generate topic labels with Ollama
-            logger.info(
-                f"Generating LLM topic names for layer {layer_idx} with Ollama..."
-            )
-            cluster_labels = generate_cluster_topic_labels(
-                characteristics,
-                comment_texts=comment_texts,
-                layer=cluster_layer,
-                layer_idx=layer_idx,
-                conversation_name=conversation_name,
-                use_ollama=True,
-                document_map=document_map,
-            )
+                # Count clusters (exclude noise -1)
+                unique_clusters = np.unique(cluster_layer)
+                unique_clusters = unique_clusters[unique_clusters >= 0]
+                total_clusters += int(len(unique_clusters))
 
-            # Save LLM topic names
-            with open(
-                os.path.join(
-                    output_dir,
-                    f"{conversation_id}_comment_layer_{layer_idx}_labels.json",
-                ),
-                "w",
-            ) as f:
-                json.dump(cluster_labels, f, indent=2)
-
-            # Store in DynamoDB if provided
-            if dynamo_storage:
                 logger.info(
-                    f"Storing LLM topic names for layer {layer_idx} in DynamoDB..."
+                    f"Generating LLM topic names for layer {layer_idx} with Anthropic..."
                 )
-                # Get model name from environment variable or use default
-                model_name = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
-                llm_topic_models = DataConverter.batch_convert_llm_topic_names(
-                    conversation_id,
-                    cluster_labels,
-                    layer_idx,
-                    model_name=model_name,  # Model used by Ollama
-                    job_id=job_id,  # Pass job_id
+                cluster_labels, llm_stats = generate_cluster_topic_labels(
+                    characteristics,
+                    comment_texts=comment_texts,
+                    layer=cluster_layer,
+                    layer_idx=layer_idx,
+                    conversation_name=conversation_name,
+                    enable_llm_topic_naming=True,
+                    document_map=document_map,
                 )
-                result = dynamo_storage.batch_create_llm_topic_names(llm_topic_models)
-                logger.info(
-                    f"Stored {result['success']} LLM topic names with {result['failure']} failures"
+
+                total_llm_attempted += int(llm_stats.get("attempted", 0))
+                total_llm_succeeded += int(llm_stats.get("succeeded", 0))
+
+                if not cluster_labels:
+                    logger.warning(
+                        f"Topic naming produced no labels (non-blocking) for layer {layer_idx}; skipping persistence"
+                    )
+                    continue
+
+                # Save LLM topic names
+                with open(
+                    os.path.join(
+                        output_dir,
+                        f"{conversation_id}_comment_layer_{layer_idx}_labels.json",
+                    ),
+                    "w",
+                ) as f:
+                    json.dump(cluster_labels, f, indent=2)
+
+                # Store in DynamoDB if provided
+                if dynamo_storage:
+                    try:
+                        logger.info(
+                            f"Storing LLM topic names for layer {layer_idx} in DynamoDB..."
+                        )
+                        model_name = os.environ.get("ANTHROPIC_MODEL")
+                        llm_topic_models = DataConverter.batch_convert_llm_topic_names(
+                            conversation_id,
+                            cluster_labels,
+                            layer_idx,
+                            model_name=model_name,  # Model used for LLM topic naming
+                            job_id=job_id,  # Pass job_id
+                        )
+                        result = dynamo_storage.batch_create_llm_topic_names(
+                            llm_topic_models
+                        )
+                        logger.info(
+                            f"Stored {result['success']} LLM topic names with {result['failure']} failures"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to persist LLM topic names (non-blocking) for layer {layer_idx}: {e}"
+                        )
+                        logger.debug(
+                            "LLM topic persistence exception details:\n%s",
+                            traceback.format_exc(),
+                        )
+            except Exception as e:
+                logger.warning(f"Topic naming failed for layer {layer_idx}: {e}")
+                logger.debug(
+                    "Topic naming layer exception details:\n%s", traceback.format_exc()
                 )
+                continue
 
             # Create a new static datamapplot with the LLM labels
             # logger.info(f"Generating static datamapplot with LLM labels for layer {layer_idx}...")
@@ -1154,6 +1317,12 @@ def process_layers_and_create_visualizations(
             # )
             logger.info(
                 f"Skipped static datamapplot with LLM labels for layer {layer_idx}..."
+            )
+
+        if strict_llm and total_clusters > 0 and total_llm_succeeded == 0:
+            raise RuntimeError(
+                f"LLM topic naming enabled but produced 0 successful labels across {total_clusters} clusters "
+                f"({total_llm_attempted} LLM attempts)."
             )
 
     return index_file
@@ -1324,7 +1493,7 @@ def create_enhanced_multilayer_index(
 
 
 def process_conversation(
-    zid, export_dynamo=True, use_ollama=False, include_moderation=False
+    zid, export_dynamo=True, enable_llm_topic_naming=False, include_moderation=False
 ):
     """
     Main function to process a conversation and generate visualizations.
@@ -1332,7 +1501,7 @@ def process_conversation(
     Args:
         zid: Conversation ID
         export_dynamo: Whether to export results to DynamoDB
-        use_ollama: Whether to use Ollama for topic naming
+        enable_llm_topic_naming: Whether to use LLM (Anthropic) for topic naming
     """
     # Create conversation directory
     output_dir = os.path.join(
@@ -1440,7 +1609,7 @@ def process_conversation(
         cluster_layers,
         comment_texts,
         output_dir,
-        use_ollama=use_ollama,
+        enable_llm_topic_naming=enable_llm_topic_naming,
         dynamo_storage=dynamo_storage,
         job_id=job_id,  # Pass job_id
     )
@@ -1487,13 +1656,14 @@ def main():
         help="Use mock data instead of connecting to PostgreSQL",
     )
     parser.add_argument(
-        "--use-ollama", action="store_true", help="Use Ollama for topic naming"
+        "--enable-llm-topic-naming",
+        action="store_true",
+        help="Enable LLM topic naming for clusters (uses Anthropic via ANTHROPIC_MODEL)",
     )
     parser.add_argument(
         "--include_moderation",
-        type=bool,
-        default=False,
-        help="Whether or not to include moderated comments in reports. If false, moderated comments will appear.",
+        action="store_true",
+        help="Include moderated comments in reports (flag: present=True, absent=False).",
     )
 
     args = parser.parse_args()
@@ -1507,9 +1677,8 @@ def main():
         db_password=args.db_password,
     )
 
-    # Log Ollama usage
-    if args.use_ollama:
-        logger.info("Ollama will be used for topic naming")
+    if args.enable_llm_topic_naming:
+        logger.info("LLM topic naming is enabled (Anthropic)")
 
     # Process conversation
     if args.use_mock_data:
@@ -1558,17 +1727,25 @@ def main():
             cluster_layers,
             comment_texts,
             output_dir,
-            use_ollama=args.use_ollama,
+            enable_llm_topic_naming=args.enable_llm_topic_naming,
         )
     else:
         # Process with real data from PostgreSQL
-        process_conversation(
+        ok = process_conversation(
             args.zid,
             export_dynamo=not args.no_dynamo,
-            use_ollama=args.use_ollama,
+            enable_llm_topic_naming=args.enable_llm_topic_naming,
             include_moderation=args.include_moderation,
         )
 
+        if not ok:
+            raise RuntimeError("Conversation processing failed")
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.error("Fatal error in run_pipeline: %s", e)
+        logger.debug("Fatal exception details:\n%s", traceback.format_exc())
+        raise

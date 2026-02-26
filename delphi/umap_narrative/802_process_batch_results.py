@@ -347,6 +347,15 @@ class BatchResultProcessor:
             
             # Store in Delphi_NarrativeReports
             rid_section_model = f"{conversation_id}#{section_name}#{self.batch_job.get('model')}"
+
+            # New metadata fields for downstream rendering / indexing
+            section_kind = metadata.get('section_type')
+            if not section_kind:
+                # Back-compat: infer kind from section_name conventions
+                if isinstance(section_name, str) and '_global_' in section_name:
+                    section_kind = 'global'
+                else:
+                    section_kind = 'topic'
             
             report_item = {
                 "rid_section_model": rid_section_model,
@@ -359,7 +368,12 @@ class BatchResultProcessor:
                 "report_id": conversation_id,
                 "metadata": {
                     "topic_name": topic_name,
-                    "cluster_id": metadata.get('cluster_id')
+                    "topic_key": metadata.get('topic_key'),
+                    "section_kind": section_kind,
+                    "cluster_id": metadata.get('cluster_id'),
+                    "group_id": metadata.get('group_id'),
+                    "layer_id": metadata.get('layer_id'),
+                    "section_name": section_name
                 }
             }
             
@@ -479,6 +493,13 @@ class BatchResultProcessor:
                         response_text = await model_provider.get_response(system, user_message)
                         
                         # Store in Delphi_NarrativeReports
+                        section_kind = metadata.get('section_type')
+                        if not section_kind:
+                            if isinstance(section_name, str) and '_global_' in section_name:
+                                section_kind = 'global'
+                            else:
+                                section_kind = 'topic'
+
                         report_item = {
                             "rid_section_model": rid_section_model,
                             "timestamp": datetime.now().isoformat(),
@@ -489,6 +510,15 @@ class BatchResultProcessor:
                             "request_id": req_id,
                             "sequential_fallback": True,
                             "report_id": conversation_id,
+                            "metadata": {
+                                "topic_name": topic_name,
+                                "topic_key": metadata.get('topic_key'),
+                                "section_kind": section_kind,
+                                "cluster_id": metadata.get('cluster_id'),
+                                "group_id": metadata.get('group_id'),
+                                "layer_id": metadata.get('layer_id'),
+                                "section_name": section_name
+                            }
                         }
                         
                         self.report_storage.put_item(report_item)

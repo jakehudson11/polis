@@ -398,6 +398,19 @@ def create_evoc_tables(dynamodb, delete_existing=False):
             ],
             'BillingMode': 'PAY_PER_REQUEST'
         },
+        # Topic hierarchy table for storing parent/child relationships and propagation metadata
+        # Sort key pattern: "{job_id}#layer#{layer_id}#topic#{topic_key}" (supports begins_with("{job_id}#") queries)
+        'Delphi_TopicHierarchy': {
+            'KeySchema': [
+                {'AttributeName': 'conversation_id', 'KeyType': 'HASH'},
+                {'AttributeName': 'job_layer_topic', 'KeyType': 'RANGE'}
+            ],
+            'AttributeDefinitions': [
+                {'AttributeName': 'conversation_id', 'AttributeType': 'S'},
+                {'AttributeName': 'job_layer_topic', 'AttributeType': 'S'}
+            ],
+            'BillingMode': 'PAY_PER_REQUEST'
+        },
         # Topic Agenda table for storing user selections
         'Delphi_TopicAgendaSelections': {
             'KeySchema': [
@@ -524,10 +537,10 @@ def create_tables(endpoint_url=None, region_name='us-east-1',
         aws_profile: AWS profile to use (optional)
     """
     # Set up environment variables for credentials if not already set (for local development)
-    if not os.environ.get('AWS_ACCESS_KEY_ID') and endpoint_url and ('localhost' in endpoint_url or 'host.docker.internal' in endpoint_url or 'polis-dynamodb-local' in endpoint_url):
+    if not os.environ.get('AWS_ACCESS_KEY_ID') and endpoint_url and ('localhost' in endpoint_url or 'host.docker.internal' in endpoint_url or 'polis-dynamodb-local' in endpoint_url or 'dynamodb-local' in endpoint_url):
         os.environ['AWS_ACCESS_KEY_ID'] = 'fakeMyKeyId'
     
-    if not os.environ.get('AWS_SECRET_ACCESS_KEY') and endpoint_url and ('localhost' in endpoint_url or 'host.docker.internal' in endpoint_url or 'polis-dynamodb-local' in endpoint_url):
+    if not os.environ.get('AWS_SECRET_ACCESS_KEY') and endpoint_url and ('localhost' in endpoint_url or 'host.docker.internal' in endpoint_url or 'polis-dynamodb-local' in endpoint_url or 'dynamodb-local' in endpoint_url):
         os.environ['AWS_SECRET_ACCESS_KEY'] = 'fakeSecretAccessKey'
     
     # Create DynamoDB session and resource

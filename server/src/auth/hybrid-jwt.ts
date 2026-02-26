@@ -200,6 +200,8 @@ function _createHybridJwtMiddleware(
         }
         req.p.emailVerified = true;
 
+        req.p.delphiEnabled = true; // Internal proxy has full access including Delphi
+
         return next();
       }
     }

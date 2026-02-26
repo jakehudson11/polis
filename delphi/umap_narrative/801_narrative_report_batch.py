@@ -259,8 +259,19 @@ class BatchReportGenerator:
             results = self.postgres_client.query(sql, {"zid": conversation_id, "math_env": math_env})
             
             if not results:
-                logger.warning(f"No math_main data found for conversation {conversation_id} with math_env {math_env}")
-                return None
+                logger.warning(f"No math_main data found for conversation {conversation_id} with math_env {math_env}; trying fallback without math_env filter")
+                fallback_sql = """
+                SELECT data
+                FROM math_main
+                WHERE zid = :zid
+                ORDER BY modified DESC
+                LIMIT 1
+                """
+                results = self.postgres_client.query(fallback_sql, {"zid": conversation_id})
+                if not results:
+                    logger.warning(f"No math_main data found for conversation {conversation_id} in any math_env")
+                    return None
+                logger.info(f"Using fallback math_main row for conversation {conversation_id} from any available math_env")
             
             # Parse the JSON data
             math_data = results[0]['data']
@@ -297,44 +308,85 @@ class BatchReportGenerator:
 
             if self.include_moderation:
                 comments = [comment for comment in comments if comment['mod'] > -1]
-            
-            # Get math data from the Clojure math pipeline (stored in math_main table)
-            math_data = self._get_math_main_data(int(self.conversation_id))
-            if not math_data:
-                logger.warning(f"No math data found in math_main for conversation {self.conversation_id}")
-                return None
-            
-            # Extract pre-calculated metrics from Clojure math pipeline
-            tids = math_data.get('tids', [])
-            extremity_array = math_data.get('pca', {}).get('comment-extremity', [])
-            consensus_object = math_data.get('group-aware-consensus', {})
-            
-            logger.info(f"Retrieved {len(tids)} comment IDs with pre-calculated metrics from Clojure math pipeline")
-            
-            # Create lookup maps for the pre-calculated values
-            extremity_map = {}
-            consensus_map = {}
-            
-            for i, tid in enumerate(tids):
-                if i < len(extremity_array):
-                    extremity_map[str(tid)] = extremity_array[i]
-                if str(tid) in consensus_object:
-                    consensus_map[str(tid)] = consensus_object[str(tid)]
-            
-            # Get basic comment and vote data (without recalculating metrics)
-            export_data = self.group_processor.get_export_data(int(self.conversation_id), self.include_moderation)
+
+            # Get basic comment + vote data in the export format expected downstream.
+            # This path is compatible with local/dev where the legacy Clojure math_main table may be empty.
+            export_data = self.group_processor.get_export_data(
+                int(self.conversation_id),
+                self.include_moderation,
+            )
             processed_comments = export_data.get('comments', [])
-            
-            # Enrich comments with pre-calculated Clojure metrics
-            for comment in processed_comments:
-                comment_id = str(comment.get('comment_id', ''))
-                # Use pre-calculated values from Clojure math pipeline
-                comment['comment_extremity'] = extremity_map.get(comment_id, 0)
-                comment['group_aware_consensus'] = consensus_map.get(comment_id, 0)
-                # Keep the calculated num_groups from GroupDataProcessor
-                # (this is just a count, not a complex calculation)
-            
-            logger.info(f"Enriched {len(processed_comments)} comments with Clojure-calculated metrics")
+
+            def _coerce_int(value, default=0):
+                if value is None:
+                    return default
+                if isinstance(value, bool):
+                    return int(value)
+                if isinstance(value, (int, float)):
+                    return int(value)
+                if isinstance(value, str):
+                    try:
+                        return int(float(value.strip()))
+                    except ValueError:
+                        return default
+                return default
+
+            votable_comment_count = sum(
+                1
+                for comment in processed_comments
+                if _coerce_int(comment.get('votes', 0), default=0) > 0
+            )
+            logger.info(
+                f"Exported {len(processed_comments)} comments for conversation {self.conversation_id}; "
+                f"comments with votes: {votable_comment_count}"
+            )
+
+            if not processed_comments:
+                raise ValueError(
+                    f"No votable comments found for conversation {self.conversation_id}. "
+                    "Cannot generate narratives without vote data."
+                )
+            if votable_comment_count == 0:
+                raise ValueError(
+                    f"No votable comments found for conversation {self.conversation_id} (all exported comments have 0 votes). "
+                    "Cannot generate narratives without vote data."
+                )
+
+            # Attempt to load pre-calculated metrics from the legacy Clojure math pipeline (math_main).
+            # If absent, keep GroupDataProcessor metrics (which may be DynamoDB-backed) instead of failing.
+            math_data = self._get_math_main_data(int(self.conversation_id))
+            if math_data:
+                tids = math_data.get('tids', [])
+                extremity_array = math_data.get('pca', {}).get('comment-extremity', [])
+                consensus_object = math_data.get('group-aware-consensus', {})
+
+                logger.info(
+                    f"Retrieved {len(tids)} comment IDs with pre-calculated metrics from Clojure math pipeline"
+                )
+
+                extremity_map = {}
+                consensus_map = {}
+                for i, tid in enumerate(tids):
+                    if i < len(extremity_array):
+                        extremity_map[str(tid)] = extremity_array[i]
+                    if str(tid) in consensus_object:
+                        consensus_map[str(tid)] = consensus_object[str(tid)]
+
+                for record in processed_comments:
+                    comment_id = str(record.get('comment_id', ''))
+                    if comment_id in extremity_map:
+                        record['comment_extremity'] = extremity_map.get(comment_id, 0)
+                    if comment_id in consensus_map:
+                        record['group_aware_consensus'] = consensus_map.get(comment_id, 0)
+
+                logger.info(
+                    f"Applied Clojure math_main-derived metrics to {len(processed_comments)} exported comments"
+                )
+            else:
+                logger.warning(
+                    f"No math_main data available for conversation {self.conversation_id}; "
+                    "continuing with GroupDataProcessor-derived metrics."
+                )
             
             # Load cluster assignments from DynamoDB
             cluster_map = self.load_comment_clusters_from_dynamodb(self.conversation_id)
@@ -361,13 +413,14 @@ class BatchReportGenerator:
                 "conversation": conversation,
                 "comments": comments,
                 "processed_comments": processed_comments,
-                "math_data": math_data
+                "math_data": math_data,
+                "export_data": export_data
             }
         except Exception as e:
             logger.error(f"Error getting conversation data: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
-            return None
+            raise
         finally:
             # Clean up connection
             self.postgres_client.shutdown()
@@ -488,6 +541,12 @@ class BatchReportGenerator:
                 
                 # Filter topic names for the current layer
                 layer_topic_names = [item for item in topic_names_items if int(item.get('layer_id', -1)) == layer_id]
+                topic_name_by_cluster_id = {}
+                for item in layer_topic_names:
+                    cluster_id = item.get('cluster_id')
+                    if cluster_id is None:
+                        continue
+                    topic_name_by_cluster_id[cluster_id] = item.get('topic_name', f"Topic {cluster_id}")
                 
                 # Build a map of {cluster_id: [comment_ids]} for the current layer
                 topic_comments = defaultdict(list)
@@ -516,6 +575,7 @@ class BatchReportGenerator:
                         sample_comments = [str(s) for s in raw_samples]
 
                     topic = {
+                        "section_type": "topic",
                         "layer_id": layer_id,
                         "cluster_id": cluster_id,
                         "name": topic_item.get('topic_name', f"Topic {cluster_id}"),
@@ -524,6 +584,49 @@ class BatchReportGenerator:
                         "sample_comments": sample_comments
                     }
                     all_topics.append(topic)
+
+                # --- Add tribe sections for ALL clusters at this layer ---
+                # Tribe sections are generated for every cluster_id seen in comment assignments, even if it lacks a topic name.
+                def _cluster_sort_key(cid):
+                    try:
+                        return (0, int(cid))
+                    except (TypeError, ValueError):
+                        return (1, str(cid))
+
+                for cluster_id in sorted(topic_comments.keys(), key=_cluster_sort_key):
+                    if cluster_id is None:
+                        continue
+
+                    # Stable identifiers
+                    tribe_topic_key = f"tribe_{layer_id}_{cluster_id}"
+                    tribe_title_section_name = f"{self.job_id}_tribe_{layer_id}_{cluster_id}_title"
+                    tribe_insights_section_name = f"{self.job_id}_tribe_{layer_id}_{cluster_id}_insights"
+
+                    # Use existing topic name as a human-readable label when available
+                    tribe_display_name = topic_name_by_cluster_id.get(cluster_id, f"Tribe {cluster_id}")
+
+                    all_topics.append({
+                        "section_type": "tribe_title",
+                        "layer_id": layer_id,
+                        "cluster_id": cluster_id,
+                        "group_id": cluster_id,
+                        "name": tribe_display_name,
+                        "topic_key": tribe_topic_key,
+                        "section_name": tribe_title_section_name,
+                        "citations": topic_comments.get(cluster_id, []),
+                        "sample_comments": []
+                    })
+                    all_topics.append({
+                        "section_type": "tribe_insights",
+                        "layer_id": layer_id,
+                        "cluster_id": cluster_id,
+                        "group_id": cluster_id,
+                        "name": tribe_display_name,
+                        "topic_key": tribe_topic_key,
+                        "section_name": tribe_insights_section_name,
+                        "citations": topic_comments.get(cluster_id, []),
+                        "sample_comments": []
+                    })
 
             # --- Step 3: Add global sections ---
             if not self.job_id:
@@ -794,6 +897,251 @@ class BatchReportGenerator:
             except Exception:
                 # Last resort: return first N comments
                 return comments[:limit]
+
+    def _filter_processed_comments(self, conversation_data: dict, filter_func=None, filter_args=None) -> List[Dict[str, Any]]:
+        """Filter processed comments using the same semantics as get_comments_as_xml, but return records."""
+        if not conversation_data:
+            return []
+
+        processed_comments = conversation_data.get('processed_comments', [])
+        if not processed_comments:
+            return []
+
+        if not filter_func:
+            return list(processed_comments)
+
+        if filter_args:
+            return [c for c in processed_comments if filter_func(c, **filter_args)]
+        return [c for c in processed_comments if filter_func(c)]
+
+    def _extract_participant_group_ids(self, comment_record: Dict[str, Any]) -> List[int]:
+        group_ids = set()
+        for key in comment_record.keys():
+            if not isinstance(key, str):
+                continue
+            if key.startswith('group-') and key.endswith('-votes'):
+                # key format: group-{g}-votes
+                parts = key.split('-')
+                if len(parts) >= 3:
+                    try:
+                        group_ids.add(int(parts[1]))
+                    except ValueError:
+                        continue
+        return sorted(group_ids)
+
+    def _summarize_participant_groups(self, comments: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Aggregate per-participant-group vote totals and rates across a set of comment export records."""
+        totals: Dict[int, Dict[str, int]] = {}
+
+        def _coerce_int(value, default=0):
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, str):
+                try:
+                    return int(float(value.strip()))
+                except ValueError:
+                    return default
+            return default
+
+        for record in comments:
+            for group_id in self._extract_participant_group_ids(record):
+                if group_id not in totals:
+                    totals[group_id] = {"votes": 0, "agrees": 0, "disagrees": 0, "passes": 0}
+                totals[group_id]["votes"] += _coerce_int(record.get(f"group-{group_id}-votes", 0))
+                totals[group_id]["agrees"] += _coerce_int(record.get(f"group-{group_id}-agrees", 0))
+                totals[group_id]["disagrees"] += _coerce_int(record.get(f"group-{group_id}-disagrees", 0))
+                totals[group_id]["passes"] += _coerce_int(record.get(f"group-{group_id}-passes", 0))
+
+        summaries = []
+        for group_id, stats in sorted(totals.items(), key=lambda kv: kv[0]):
+            votes = max(stats["votes"], 0)
+            agrees = max(stats["agrees"], 0)
+            disagrees = max(stats["disagrees"], 0)
+            passes = max(stats["passes"], 0)
+            agree_rate = agrees / votes if votes else 0.0
+            disagree_rate = disagrees / votes if votes else 0.0
+            pass_rate = passes / votes if votes else 0.0
+            summaries.append({
+                "participant_group_id": group_id,
+                "votes": votes,
+                "agrees": agrees,
+                "disagrees": disagrees,
+                "passes": passes,
+                "agree_rate": agree_rate,
+                "disagree_rate": disagree_rate,
+                "pass_rate": pass_rate
+            })
+
+        return {
+            "groups": summaries,
+            "n_groups": len(summaries)
+        }
+
+    def _count_participants_by_group(self, export_data: Dict[str, Any]) -> Dict[int, int]:
+        """Count participants per participant-group using export_data['math_result']['group_assignments']."""
+        try:
+            assignments = export_data.get('math_result', {}).get('group_assignments', {}) if isinstance(export_data, dict) else {}
+            counts: Dict[int, int] = {}
+            if not isinstance(assignments, dict):
+                return counts
+            for _participant_id, group_id in assignments.items():
+                try:
+                    gid = int(group_id)
+                except (TypeError, ValueError):
+                    continue
+                counts[gid] = counts.get(gid, 0) + 1
+            return counts
+        except Exception:
+            return {}
+
+    def _select_representative_comments_for_tribe(self, comments: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+        """Rank comments for tribe sections by participation and within-comment consensus strength."""
+
+        def _coerce_float(value, default=0.0):
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return float(int(value))
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value.strip())
+                except ValueError:
+                    return default
+            return default
+
+        def _score(record: Dict[str, Any]) -> Tuple[float, float, float]:
+            votes = _coerce_float(record.get('votes', record.get('total-votes', 0)), 0.0)
+            agrees = _coerce_float(record.get('agrees', record.get('total-agrees', 0)), 0.0)
+            disagrees = _coerce_float(record.get('disagrees', record.get('total-disagrees', 0)), 0.0)
+            consensus_strength = max(agrees, disagrees) / max(votes, 1.0)
+            engagement = agrees + disagrees
+            return (votes, consensus_strength, engagement)
+
+        if len(comments) <= limit:
+            return comments
+
+        sorted_comments = sorted(comments, key=_score, reverse=True)
+        return sorted_comments[:limit]
+
+    def _build_tribe_payload(self,
+                             conversation_data: Dict[str, Any],
+                             layer_id: int,
+                             group_id: Union[int, str],
+                             comment_limit: int,
+                             include_comparison: bool) -> Dict[str, Any]:
+        """Build the data payload for tribe_* templates."""
+        # Filter comments for this tribe using cluster assignments
+        filter_args = {
+            'topic_cluster_id': group_id,
+            'topic_layer_id': layer_id,
+            'topic_citations': [],
+            'sample_comments': []
+        }
+        tribe_comments = self._filter_processed_comments(conversation_data, self.filter_topics, filter_args)
+
+        # Representative subset (ranked)
+        representative = self._select_representative_comments_for_tribe(tribe_comments, comment_limit)
+
+        structured_comments_xml = PolisConverter.convert_to_xml(representative) if representative else ""
+
+        def _coerce_int(value, default=0):
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, str):
+                try:
+                    return int(float(value.strip()))
+                except ValueError:
+                    return default
+            return default
+
+        tribe_total_votes = sum(_coerce_int(c.get('votes', c.get('total-votes', 0))) for c in tribe_comments)
+        tribe_total_agrees = sum(_coerce_int(c.get('agrees', c.get('total-agrees', 0))) for c in tribe_comments)
+        tribe_total_disagrees = sum(_coerce_int(c.get('disagrees', c.get('total-disagrees', 0))) for c in tribe_comments)
+        tribe_total_passes = sum(_coerce_int(c.get('passes', c.get('total-passes', 0))) for c in tribe_comments)
+        tribe_total_comments = len(tribe_comments)
+
+        # Simple aggregate rates (kept numeric in the payload; templates instruct the model not to print raw numbers)
+        tribe_agree_rate = (tribe_total_agrees / tribe_total_votes) if tribe_total_votes else 0.0
+        tribe_disagree_rate = (tribe_total_disagrees / tribe_total_votes) if tribe_total_votes else 0.0
+        tribe_pass_rate = (tribe_total_passes / tribe_total_votes) if tribe_total_votes else 0.0
+
+        # Consensus strength averaged across comments (unweighted and vote-weighted)
+        def _comment_consensus_strength(record: Dict[str, Any]) -> float:
+            votes = max(_coerce_int(record.get('votes', record.get('total-votes', 0))), 0)
+            agrees = max(_coerce_int(record.get('agrees', record.get('total-agrees', 0))), 0)
+            disagrees = max(_coerce_int(record.get('disagrees', record.get('total-disagrees', 0))), 0)
+            return (max(agrees, disagrees) / votes) if votes else 0.0
+
+        if tribe_comments:
+            strengths = [_comment_consensus_strength(c) for c in tribe_comments]
+            avg_consensus_strength = float(np.mean(strengths)) if strengths else 0.0
+            weighted_strengths = [
+                _comment_consensus_strength(c) * max(_coerce_int(c.get('votes', c.get('total-votes', 0))), 0)
+                for c in tribe_comments
+            ]
+            vote_sum = sum(max(_coerce_int(c.get('votes', c.get('total-votes', 0))), 0) for c in tribe_comments)
+            vote_weighted_consensus_strength = (sum(weighted_strengths) / vote_sum) if vote_sum else 0.0
+        else:
+            avg_consensus_strength = 0.0
+            vote_weighted_consensus_strength = 0.0
+
+        export_data = conversation_data.get('export_data', {})
+        participant_sizes = self._count_participants_by_group(export_data)
+
+        summary_tribe = self._summarize_participant_groups(tribe_comments)
+        payload: Dict[str, Any] = {
+            "tribe": {
+                "layer_id": layer_id,
+                "group_id": int(group_id) if isinstance(group_id, (int, float, str)) and str(group_id).isdigit() else group_id,
+                "comment_count": tribe_total_comments,
+                "total_votes": tribe_total_votes,
+                "total_agrees": tribe_total_agrees,
+                "total_disagrees": tribe_total_disagrees,
+                "total_passes": tribe_total_passes,
+                "agree_rate": tribe_agree_rate,
+                "disagree_rate": tribe_disagree_rate,
+                "pass_rate": tribe_pass_rate,
+                "avg_comment_consensus_strength": avg_consensus_strength,
+                "vote_weighted_comment_consensus_strength": vote_weighted_consensus_strength,
+                "participant_group_sizes": participant_sizes,
+                "participant_group_vote_summary": summary_tribe
+            },
+            "representative_comment_sample": [
+                {
+                    "comment_id": _coerce_int(r.get('comment_id', r.get('comment-id'))),
+                    "votes": _coerce_int(r.get('votes', r.get('total-votes', 0))),
+                    "agrees": _coerce_int(r.get('agrees', r.get('total-agrees', 0))),
+                    "disagrees": _coerce_int(r.get('disagrees', r.get('total-disagrees', 0))),
+                    "passes": _coerce_int(r.get('passes', r.get('total-passes', 0))),
+                    "text": r.get('comment', '')
+                }
+                for r in representative
+            ],
+            "structured_comments": structured_comments_xml
+        }
+
+        if include_comparison:
+            all_comments = conversation_data.get('processed_comments', [])
+            summary_all = self._summarize_participant_groups(all_comments)
+            tribe_comment_ids = set(str(c.get('comment_id', c.get('comment-id'))) for c in tribe_comments)
+            other_comments = [c for c in all_comments if str(c.get('comment_id', c.get('comment-id'))) not in tribe_comment_ids]
+            summary_other = self._summarize_participant_groups(other_comments)
+            payload["comparison"] = {
+                "participant_group_vote_summary_all_comments": summary_all,
+                "participant_group_vote_summary_outside_tribe": summary_other
+            }
+
+        return payload
     
     async def get_comments_as_xml(self, conversation_data: dict, filter_func=None, filter_args=None):
         """Get comments as XML from pre-fetched data."""
@@ -813,6 +1161,18 @@ class BatchReportGenerator:
                     filtered_comments = [c for c in filtered_comments if filter_func(c, **filter_args)]
                 else:
                     filtered_comments = [c for c in filtered_comments if filter_func(c)]
+
+            # Global section fallback: if threshold filter yields zero comments,
+            # pass through all comments and let high-quality selection/ranking handle prioritization.
+            is_global_filter = (
+                filter_func == self.filter_topics
+                and isinstance(filter_args, dict)
+                and filter_args.get('filter_type') is not None
+            )
+            if is_global_filter and len(filtered_comments) == 0:
+                filter_type = filter_args.get('filter_type')
+                logger.warning(f"Global filter '{filter_type}' yielded 0 comments, falling back to top-K selection")
+                filtered_comments = data["processed_comments"]
             
             # Apply dynamic comment limiting with intelligent selection
             if filter_func == self.filter_topics and len(filtered_comments) > 0:
@@ -899,22 +1259,31 @@ class BatchReportGenerator:
         # Initialize list for batch requests
         batch_requests = []
         
-        # For each topic, prepare a prompt and add it to the batch
+        # For each section, prepare a prompt and add it to the batch
         for topic in topics:
             topic_name = topic['name']
             topic_key = topic['topic_key']  # Use the stable topic_key from DynamoDB
+
+            section_type = topic.get('section_type') or ('global' if topic.get('filter_type') is not None else 'topic')
             
-            # Convert topic_key to section_name format
-            # Topic keys use # delimiters (uuid#layer#cluster) but section names use _ delimiters (uuid_layer_cluster)
-            if '#' in topic_key:
-                # Versioned format: convert uuid#layer#cluster -> uuid_layer_cluster
-                section_name = topic_key.replace('#', '_')
-            else:
-                # Legacy format: use as-is (layer0_0, global_groups, etc.)
-                section_name = topic_key
+            # Determine section_name.
+            # - Tribe sections use an explicit, stable section_name that includes job_id and subtype.
+            # - Other sections fall back to topic_key-derived naming.
+            section_name = topic.get('section_name')
+            if not section_name:
+                # Convert topic_key to section_name format
+                # Topic keys use # delimiters (uuid#layer#cluster) but section names use _ delimiters (uuid_layer_cluster)
+                if '#' in topic_key:
+                    # Versioned format: convert uuid#layer#cluster -> uuid_layer_cluster
+                    section_name = topic_key.replace('#', '_')
+                else:
+                    # Legacy format: use as-is (layer0_0, global_groups, etc.)
+                    section_name = topic_key
             
-            # Check if this is a global section or layer-specific topic
-            is_global_section = topic.get('section_type') == 'global'
+            # Check section kinds
+            is_global_section = section_type == 'global'
+            is_tribe_title = section_type == 'tribe_title'
+            is_tribe_insights = section_type == 'tribe_insights'
             
             if is_global_section:
                 # Global section - use filter_type and filter_threshold
@@ -948,8 +1317,28 @@ class BatchReportGenerator:
                            f"topic_name: {topic_name}, topic_key: {topic_key}")
             
             
-            # Get comments as XML
-            structured_comments = await self.get_comments_as_xml(conversation_data, self.filter_topics, filter_args)
+            # Get comments as XML and/or additional payload
+            tribe_payload = None
+            if is_tribe_title:
+                tribe_payload = self._build_tribe_payload(
+                    conversation_data,
+                    layer_id=int(topic_layer_id),
+                    group_id=topic_cluster_id,
+                    comment_limit=15,
+                    include_comparison=False,
+                )
+                structured_comments = tribe_payload.get('structured_comments', '')
+            elif is_tribe_insights:
+                tribe_payload = self._build_tribe_payload(
+                    conversation_data,
+                    layer_id=int(topic_layer_id),
+                    group_id=topic_cluster_id,
+                    comment_limit=50,
+                    include_comparison=True,
+                )
+                structured_comments = tribe_payload.get('structured_comments', '')
+            else:
+                structured_comments = await self.get_comments_as_xml(conversation_data, self.filter_topics, filter_args)
             
             # Debug logging for topic 0
             if topic_cluster_id == 0 or str(topic_cluster_id) == "0":
@@ -989,6 +1378,12 @@ class BatchReportGenerator:
                 template_path = self.prompt_base_path / f"subtaskPrompts/{template_filename}"
                 
                 logger.info(f"Using template {template_filename} for global section {section_name} (base_name: {base_name})")
+            elif is_tribe_title:
+                template_path = self.prompt_base_path / "subtaskPrompts/tribe_title.xml"
+                logger.info(f"Using tribe_title.xml template for tribe title section {section_name}")
+            elif is_tribe_insights:
+                template_path = self.prompt_base_path / "subtaskPrompts/tribe_insights.xml"
+                logger.info(f"Using tribe_insights.xml template for tribe insights section {section_name}")
             else:
                 # Use topics template for layer-specific topics
                 template_path = self.prompt_base_path / "subtaskPrompts/topics.xml"
@@ -1006,7 +1401,19 @@ class BatchReportGenerator:
                 template_dict = xmltodict.parse(template_content)
                 
                 # Find the data element and replace its content
-                template_dict['polisAnalysisPrompt']['data'] = {"content": {"structured_comments": structured_comments}}
+                data_payload = {"structured_comments": structured_comments}
+                if tribe_payload is not None:
+                    # Provide extra context for tribe templates without changing the existing request flow.
+                    # Keep JSON blobs as strings to avoid xmltodict structural quirks.
+                    tribe_payload_for_json = dict(tribe_payload)
+                    # Avoid embedding the XML blob twice.
+                    tribe_payload_for_json.pop('structured_comments', None)
+                    data_payload["tribe_payload_json"] = json.dumps(
+                        tribe_payload_for_json,
+                        ensure_ascii=False,
+                        default=lambda o: float(o) if isinstance(o, __import__('decimal').Decimal) else str(o)
+                    )
+                template_dict['polisAnalysisPrompt']['data'] = {"content": data_payload}
                 
                 # Add topic name to prompt
                 if 'context' in template_dict['polisAnalysisPrompt']:
@@ -1017,76 +1424,87 @@ class BatchReportGenerator:
                 prompt_xml = xmltodict.unparse(template_dict, pretty=True)
                 
                 # Add model prompt formatting
-                model_prompt = f"""
-                    {prompt_xml}
+                if is_tribe_title or is_tribe_insights or is_global_section:
+                    # Tribe templates fully define the output format; avoid adding topic-only JSON constraints.
+                    model_prompt = prompt_xml
+                else:
+                    model_prompt = f"""
+                        {prompt_xml}
 
-                    You MUST respond with a JSON object that follows this EXACT structure for topic analysis. 
-                    IMPORTANT: Do NOT simply repeat the comments verbatim. Instead, analyze the underlying themes, values,
-                    and perspectives reflected in the comments. Identify patterns in how different groups view the topic.
+                        You MUST respond with a JSON object that follows this EXACT structure for topic analysis. 
+                        IMPORTANT: Do NOT simply repeat the comments verbatim. Instead, analyze the underlying themes, values,
+                        and perspectives reflected in the comments. Identify patterns in how different groups view the topic.
 
-                    ```json
-                    {{
-                    "id": "topic_overview_and_consensus",
-                    "title": "Overview of Topic and Consensus",
-                    "paragraphs": [
+                        ```json
                         {{
-                        "id": "topic_overview",
-                        "title": "Overview of Topic",
-                        "sentences": [
+                        \"id\": \"topic_overview_and_consensus\",
+                        \"title\": \"Overview of Topic and Consensus\",
+                        \"paragraphs\": [
                             {{
-                            "clauses": [
+                            \"id\": \"topic_overview\",
+                            \"title\": \"Overview of Topic\",
+                            \"sentences\": [
                                 {{
-                                "text": "This topic reveals patterns of participant views on economic development, community identity, and resource priorities.",
-                                "citations": [190, 191, 1142]
-                                }},
-                                {{
-                                "text": "Analysis of what the comments reveal about underlying values and priorities in the community.",
-                                "citations": [1245, 1256]
+                                \"clauses\": [
+                                    {{
+                                    \"text\": \"This topic reveals patterns of participant views on economic development, community identity, and resource priorities.\",
+                                    \"citations\": [190, 191, 1142]
+                                    }},
+                                    {{
+                                    \"text\": \"Analysis of what the comments reveal about underlying values and priorities in the community.\",
+                                    \"citations\": [1245, 1256]
+                                    }}
+                                ]
                                 }}
                             ]
-                            }}
-                        ]
-                        }},
-                        {{
-                        "id": "topic_by_groups",
-                        "title": "Group Perspectives on Topic",
-                        "sentences": [
+                            }},
                             {{
-                            "clauses": [
+                            \"id\": \"topic_by_groups\",
+                            \"title\": \"Group Perspectives on Topic\",
+                            \"sentences\": [
                                 {{
-                                "text": "Comparison of how different groups approached this topic, with analysis of the values that drive their different perspectives.",
-                                "citations": [190, 191]
+                                \"clauses\": [
+                                    {{
+                                    \"text\": \"Comparison of how different groups approached this topic, with analysis of the values that drive their different perspectives.\",
+                                    \"citations\": [190, 191]
+                                    }}
+                                ]
                                 }}
                             ]
                             }}
                         ]
                         }}
-                    ]
-                    }}
-                    ```
+                        ```
 
-                    Make sure the JSON is VALID, as defined at https://www.json.org/json-en.html:
-                    - Begin with object '{{' and end with '}}'
-                    - All keys MUST be enclosed in double quotes
-                    - NO trailing commas should be included after the last element in any array or object
-                    - Do NOT include any additional text outside of the JSON object
-                    - Do not provide explanations, only the JSON
-                    - Use the exact structure shown above with "id", "title", "paragraphs", etc.
-                    - Include relevant citations to comment IDs in the data
-                """
+                        Make sure the JSON is VALID, as defined at https://www.json.org/json-en.html:
+                        - Begin with object '{{' and end with '}}'
+                        - All keys MUST be enclosed in double quotes
+                        - NO trailing commas should be included after the last element in any array or object
+                        - Do NOT include any additional text outside of the JSON object
+                        - Do not provide explanations, only the JSON
+                        - Use the exact structure shown above with \"id\", \"title\", \"paragraphs\", etc.
+                        - Include relevant citations to comment IDs in the data
+                    """
                 
                 # Add to batch requests
+                max_tokens = 4000
+                if is_tribe_title:
+                    max_tokens = 200
+
                 batch_request = {
                     "system": system_lore,
                     "messages": [
                         {"role": "user", "content": model_prompt}
                     ],
-                    "max_tokens": 4000,
+                    "max_tokens": max_tokens,
                     "metadata": {
                         "topic_name": topic_name,
                         "topic_key": topic_key,
                         "cluster_id": topic_cluster_id,
+                        "layer_id": topic_layer_id,
                         "section_name": section_name,
+                        "section_type": section_type,
+                        "group_id": topic.get('group_id'),
                         "conversation_id": self.conversation_id
                     }
                 }
@@ -1503,7 +1921,8 @@ async def main():
                         help='Maximum number of topics to include in a single batch (default: 5)')
     parser.add_argument('--layers', type=int, nargs='+', default=None,
                         help='Specific layer numbers to process (e.g., --layers 0 1 2). If not specified, all layers will be processed.')
-    parser.add_argument('--include_moderation', type=bool, default=False, help='Whether or not to include moderated comments in reports. If false, moderated comments will appear.')
+    parser.add_argument('--include_moderation', action='store_true',
+                        help='Include moderated comments in reports (flag: present=True, absent=False).')
     args = parser.parse_args()
 
     # Get environment variables for job

@@ -33,9 +33,11 @@ services:
       - POLIS_INTERNAL_PROXY_SECRET=${POLIS_INTERNAL_PROXY_SECRET}
       
       # AI Services (Optional)
+      - LLM_PROVIDER=${LLM_PROVIDER}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL=${OPENAI_MODEL}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       
       # Internal Service URLs
       - MATH_SERVICE_URL=http://polis-math:8080
@@ -45,6 +47,7 @@ services:
       - API_SERVER_PORT=${API_SERVER_PORT:-5000}
       - DEV_MODE=${DEV_MODE:-false}
       - NODE_ENV=${NODE_ENV:-production}
+      - MATH_ENV=${MATH_ENV:-dev}
       
       # Email (Optional)
       - EMAIL_TRANSPORT_TYPES=${EMAIL_TRANSPORT_TYPES}
@@ -55,6 +58,14 @@ services:
       # Static Files
       - STATIC_FILES_HOST=${STATIC_FILES_HOST}
       - STATIC_FILES_PORT=${STATIC_FILES_PORT:-8080}
+      # DynamoDB / AWS (for Delphi)
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_S3_ENDPOINT=http://minio:9000
+      - AWS_S3_PUBLIC_ENDPOINT=http://localhost:9000
+      - AWS_S3_BUCKET_NAME=polis-delphi
+      - DYNAMODB_ENDPOINT=${DYNAMODB_ENDPOINT:-http://dynamodb-local:8000}
     ports:
       - "${API_SERVER_PORT:-5000}:5000"
     networks:
@@ -89,6 +100,7 @@ services:
     build:
       context: ./delphi
       dockerfile: Dockerfile
+      target: final
     image: polis/delphi:latest
     container_name: polis-delphi
     restart: unless-stopped
@@ -103,10 +115,11 @@ services:
       - DATABASE_SSL_MODE=${DATABASE_SSL_MODE:-disable}
       
       # AI Services
+      - LLM_PROVIDER=${LLM_PROVIDER}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
-      - OLLAMA_HOST=${OLLAMA_HOST}
-      - OLLAMA_MODEL=${OLLAMA_MODEL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL}
       
       # DynamoDB (Optional - for job queue)
       - DYNAMODB_ENDPOINT=${DYNAMODB_ENDPOINT}
@@ -115,7 +128,8 @@ services:
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_S3_ENDPOINT=${AWS_S3_ENDPOINT}
+      - AWS_S3_ENDPOINT=http://minio:9000
+      - AWS_S3_PUBLIC_ENDPOINT=http://localhost:9000
       - AWS_S3_BUCKET_NAME=${AWS_S3_BUCKET_NAME}
       
       # Delphi Configuration
@@ -127,6 +141,8 @@ services:
       - polis-net
     depends_on:
       - polis-postgres
+      - dynamodb-local
+      - minio
     deploy:
       resources:
         limits:
@@ -150,6 +166,43 @@ services:
           - postgres
     volumes:
       - polis-postgres-data:/var/lib/postgresql/data
+
+  # DynamoDB Local (for Delphi job queue in development)
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    user: root
+    container_name: dynamodb-local
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /data"
+    ports:
+      - "8000:8000"
+    networks:
+      - polis-net
+
+    volumes:
+      - dynamodb-data:/data
+
+
+  # MinIO (S3-compatible storage for Delphi)
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - polis-net
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # Client: Admin Dashboard
   client-admin:
@@ -247,3 +300,10 @@ volumes:
   polis-server-logs:
     labels:
       polis-component: server
+  dynamodb-data:
+    labels:
+      polis-component: dynamodb
+
+  minio-data:
+    labels:
+      polis-component: storage
