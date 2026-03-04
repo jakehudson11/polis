@@ -730,13 +730,28 @@ class BatchReportGenerator:
                 # Get dynamic threshold based on group count (matches Node.js logic)
                 if filter_threshold == "dynamic":
                     if num_groups == 2:
-                        threshold = 0.7
+                        base_threshold = 0.7
                     elif num_groups == 3:
-                        threshold = 0.47
+                        base_threshold = 0.47
                     elif num_groups == 4:
-                        threshold = 0.32
+                        base_threshold = 0.32
                     else:  # 5+ groups
-                        threshold = 0.24
+                        base_threshold = 0.24
+
+                    # Scale threshold for small conversations where Laplace smoothing
+                    # makes high consensus values mathematically impossible.
+                    # consensus = product of (agree+1)/(votes+2) across groups,
+                    # so the max achievable consensus shrinks with fewer voters.
+                    votes = comment.get('votes', 0)
+                    if votes > 0 and votes < 20:
+                        avg_group_size = votes / max(num_groups, 1)
+                        max_prob = (avg_group_size + 1) / (avg_group_size + 2)
+                        max_consensus = max_prob ** num_groups
+                        # Use 85% of max achievable as threshold, but never exceed
+                        # the base threshold (for large conversations the base applies)
+                        threshold = min(base_threshold, max_consensus * 0.85)
+                    else:
+                        threshold = base_threshold
                 else:
                     threshold = filter_threshold
                     
@@ -998,8 +1013,8 @@ class BatchReportGenerator:
         except Exception:
             return {}
 
-    def _select_representative_comments_for_tribe(self, comments: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
-        """Rank comments for tribe sections by participation and within-comment consensus strength."""
+    def _select_representative_comments_for_tribe(self, comments: List[Dict[str, Any]], limit: int, tribe_group_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Rank comments for tribe sections by distinctiveness and participation."""
 
         def _coerce_float(value, default=0.0):
             if value is None:
@@ -1019,9 +1034,23 @@ class BatchReportGenerator:
             votes = _coerce_float(record.get('votes', record.get('total-votes', 0)), 0.0)
             agrees = _coerce_float(record.get('agrees', record.get('total-agrees', 0)), 0.0)
             disagrees = _coerce_float(record.get('disagrees', record.get('total-disagrees', 0)), 0.0)
+
+            # If tribe_group_id is available, compute distinctiveness
+            distinctiveness = 0.0
+            if tribe_group_id is not None:
+                tribe_votes = _coerce_float(record.get(f'group-{tribe_group_id}-votes', 0), 0.0)
+                tribe_agrees = _coerce_float(record.get(f'group-{tribe_group_id}-agrees', 0), 0.0)
+                # Tribe's agreement rate
+                tribe_agree_rate = (tribe_agrees / tribe_votes) if tribe_votes > 0 else 0.5
+                # Overall agreement rate
+                overall_agree_rate = (agrees / votes) if votes > 0 else 0.5
+                # Distinctiveness: how much this tribe differs from overall
+                distinctiveness = abs(tribe_agree_rate - overall_agree_rate)
+
             consensus_strength = max(agrees, disagrees) / max(votes, 1.0)
             engagement = agrees + disagrees
-            return (votes, consensus_strength, engagement)
+            # Primary: distinctiveness, secondary: engagement, tertiary: consensus
+            return (distinctiveness, engagement, consensus_strength)
 
         if len(comments) <= limit:
             return comments
@@ -1046,7 +1075,7 @@ class BatchReportGenerator:
         tribe_comments = self._filter_processed_comments(conversation_data, self.filter_topics, filter_args)
 
         # Representative subset (ranked)
-        representative = self._select_representative_comments_for_tribe(tribe_comments, comment_limit)
+        representative = self._select_representative_comments_for_tribe(tribe_comments, comment_limit, tribe_group_id=int(group_id) if str(group_id).isdigit() else None)
 
         structured_comments_xml = PolisConverter.convert_to_xml(representative) if representative else ""
 
@@ -1123,7 +1152,10 @@ class BatchReportGenerator:
                     "agrees": _coerce_int(r.get('agrees', r.get('total-agrees', 0))),
                     "disagrees": _coerce_int(r.get('disagrees', r.get('total-disagrees', 0))),
                     "passes": _coerce_int(r.get('passes', r.get('total-passes', 0))),
-                    "text": r.get('comment', '')
+                    "text": r.get('comment', ''),
+                    "tribe_agrees": _coerce_int(r.get(f'group-{group_id}-agrees', 0)),
+                    "tribe_disagrees": _coerce_int(r.get(f'group-{group_id}-disagrees', 0)),
+                    "tribe_votes": _coerce_int(r.get(f'group-{group_id}-votes', 0)),
                 }
                 for r in representative
             ],

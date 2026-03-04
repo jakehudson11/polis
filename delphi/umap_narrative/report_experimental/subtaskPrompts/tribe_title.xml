@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <polisAnalysisPrompt version="1.0">
     <metadata>
-        <title>Generate a Concise Title for a SINGLE TRIBE (Group) in Pol.is Conversations</title>
+        <title>Generate a Concise Title for a SINGLE TRIBE in Pol.is Conversations</title>
         <purpose>Produce a short, descriptive 3-5 word tribe title based on the tribe's distinctive voting patterns and representative comments</purpose>
     </metadata>
 
     <system>
-        <instruction>You are an expert neutral analyst summarizing a single tribe/group in a Pol.is conversation.</instruction>
+        <instruction>You are an expert neutral analyst summarizing a single tribe in a Pol.is conversation.</instruction>
         <instruction>Write a title similar in spirit to topic titles, but focused on the tribe's defining characteristics, values, and stance patterns.</instruction>
     </system>
 
@@ -30,10 +30,10 @@
 
     <definitions>
         <term name="tribe">
-            <description>A single cluster/group of participants with similar voting patterns within the conversation</description>
+            <description>A single cluster of participants with similar voting patterns within the conversation</description>
         </term>
         <term name="distinctive_voting_pattern">
-            <description>Statements where this tribe consistently agrees or disagrees in a way that differs from other tribes/groups</description>
+            <description>Statements where this tribe consistently agrees or disagrees in a way that differs from other tribes</description>
         </term>
         <term name="internal_consensus">
             <description>Statements where this tribe shows strong agreement or strong disagreement within the tribe</description>

@@ -101,8 +101,10 @@ services:
       context: ./delphi
       dockerfile: Dockerfile
       target: final
+      args:
+        USE_CPU_TORCH: "true"
     image: polis/delphi:latest
-    container_name: polis-delphi
+    container_name: delphi
     restart: unless-stopped
     environment:
       # Database
@@ -148,6 +150,8 @@ services:
         limits:
           memory: ${DELPHI_CONTAINER_MEMORY:-16g}
           cpus: ${DELPHI_CONTAINER_CPUS:-2}
+    volumes:
+      - ./delphi/umap_narrative:/app/umap_narrative
 
   # PostgreSQL Database
   polis-postgres:

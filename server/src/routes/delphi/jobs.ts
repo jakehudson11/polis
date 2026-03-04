@@ -85,6 +85,44 @@ export async function handle_POST_delphi_jobs(
       return;
     }
 
+    // --- Deduplication: check for existing PENDING/PROCESSING jobs for the same report_id ---
+    if (report_id) {
+      try {
+        const existingJobParams = {
+          TableName: "Delphi_JobQueue",
+          FilterExpression:
+            "report_id = :rid AND (#s = :pending OR #s = :processing)",
+          ExpressionAttributeNames: {
+            "#s": "status",
+          },
+          ExpressionAttributeValues: {
+            ":rid": report_id,
+            ":pending": "PENDING",
+            ":processing": "PROCESSING",
+          },
+        };
+        const existingResult = await docClient.scan(existingJobParams);
+        if (existingResult.Items && existingResult.Items.length > 0) {
+          const existingJob = existingResult.Items[0];
+          logger.info(
+            `Dedup: returning existing ${existingJob.status} job ${existingJob.job_id} for report_id ${report_id}`
+          );
+          res.json({
+            status: "success",
+            message: `Existing ${existingJob.status} job found for this conversation`,
+            job_id: existingJob.job_id,
+            existing: true,
+            job_status: existingJob.status,
+          });
+          return;
+        }
+      } catch (dedupErr: any) {
+        logger.warn(
+          `Dedup check failed, proceeding with new job: ${dedupErr.message}`
+        );
+      }
+    }
+
     // Generate a unique job ID
     const job_id = uuidv4();
 

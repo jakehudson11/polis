@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <polisAnalysisPrompt version="1.0">
     <metadata>
-        <title>Guide to Analyzing and Reporting Group-Informed Consensus in Pol.is
+        <title>Guide to Analyzing and Reporting Tribe-Informed Consensus in Pol.is
             Conversations</title>
         <purpose>Generate consistent, evidence-based reports identifying and explaining areas of
-            consensus across different groups</purpose>
+            consensus across different tribes</purpose>
     </metadata>
 
     <criticalInstructions>
@@ -16,18 +16,26 @@
             DO NOT return ```json at the beginning of the response. This is not markdown. Do not end
             the response with ```, your response MUST begin with { and end with }
         </instruction>
+        <instruction>
+            CRITICAL DATA VERIFICATION: Before writing ANY claim about a statement, you MUST check the actual vote data in the XML.
+            - Check the agrees, disagrees, and votes attributes for EACH group
+            - If a comment has high agrees and zero/low disagrees in ALL groups, it IS a consensus item — do NOT claim it "failed to generate support"
+            - If a comment has high disagrees, then it is NOT a consensus item
+            - NEVER claim "universal disagreement" for statements where the data shows agreement
+            - Your narrative MUST be consistent with the actual numbers. Every claim about support or opposition must match the vote data.
+        </instruction>
     </criticalInstructions>
 
     <definitions>
         <term name="group_informed_consensus">
-            <description>Comments with high agreement across all or most groups, despite differences
+            <description>Comments with high agreement across all or most tribes, despite differences
                 on other topics</description>
-            <threshold>Variable based on number of groups (0.7 for 2 groups, 0.47 for 3 groups, 0.32
-                for 4 groups, 0.24 for 5+ groups)</threshold>
+            <threshold>Variable based on number of tribes (0.7 for 2 tribes, 0.47 for 3 tribes, 0.32
+                for 4 tribes, 0.24 for 5+ tribes)</threshold>
             <unit>consensus_score (0-1)</unit>
         </term>
         <term name="strong_consensus">
-            <description>Comments with exceptionally high agreement across all groups</description>
+            <description>Comments with exceptionally high agreement across all tribes</description>
             <threshold>0.8 consensus score</threshold>
             <unit>consensus_score</unit>
         </term>
@@ -36,7 +44,7 @@
     <analysisProcess>
         <dataProcessing>
             <step order="1">
-                <n>Identify Comments with Cross-Group Consensus</n>
+                <n>Identify Comments with Cross-Tribe Consensus</n>
                 <calculations>
                     <calculation>group_aware_consensus_score</calculation>
                     <calculation>agreement_across_groups</calculation>
@@ -76,8 +84,8 @@
                         agreement?
                     </instruction>
                     <instruction>
-                        Consider the significance of consensus in the context of group divisions
-                        elsewhere. Common ground is most meaningful when groups otherwise disagree.
+                        Consider the significance of consensus in the context of tribe divisions
+                        elsewhere. Common ground is most meaningful when tribes otherwise disagree.
                     </instruction>
                     <instruction>
                         Evaluate the strength and breadth of consensus. Is it widespread or limited
@@ -86,13 +94,13 @@
                 </criticalInstructions>
                 <format>
                     Analysis of voting patterns revealed [level_of_consensus] across different
-                    participant groups, with [number_of_comments] comments showing strong agreement
-                    that transcended group divisions. These areas of consensus were
+                    participant tribes, with [number_of_comments] comments showing strong agreement
+                    that transcended tribe divisions. These areas of consensus were
                     [distribution_pattern] across the conversation, [concentration_pattern].
                     [Additional_high_level_context].
 
-                    The strongest areas of cross-group agreement centered on [primary_consensus_topic],
-                    with several statements receiving consistently high agreement from all groups.
+                    The strongest areas of cross-tribe agreement centered on [primary_consensus_topic],
+                    with several statements receiving consistently high agreement from all tribes.
                     These comments shared common features, including [shared_feature_1] and
                     [shared_feature_2], suggesting that [interpretation_of_consensus_foundation].
                     [Additional_insight_if_relevant].
@@ -100,13 +108,13 @@
                     Other significant areas of consensus included [secondary_consensus_topic],
                     particularly statements that [feature_of_consensus_statements]. This pattern
                     suggests that despite their differences on [divisive_topic], participants from
-                    all groups shared [common_value_or_priority] when considering
+                    all tribes shared [common_value_or_priority] when considering
                     [secondary_consensus_topic].
                 </format>
                 <paragraphInstructions>
                     <instruction>
                         Provide a comprehensive overview that:
-                        - Quantifies the overall level of cross-group consensus
+                        - Quantifies the overall level of cross-tribe consensus
                         - Identifies main areas/topics generating consensus
                         - Analyzes patterns in consensus comments
                         - Proposes shared values or priorities underlying agreement
@@ -124,11 +132,11 @@
                 <criticalInstructions>
                     <instruction>
                         Analyze what consensus areas reveal about shared values or priorities across
-                        groups, even when they disagree on other topics.
+                        tribes, even when they disagree on other topics.
                     </instruction>
                     <instruction>
                         Consider how consensus areas might serve as bridges between otherwise
-                        divided groups. What starting points for dialogue emerge?
+                        divided tribes. What starting points for dialogue emerge?
                     </instruction>
                     <instruction>
                         Balance optimism about consensus with realistic assessment of its limits.
@@ -137,21 +145,21 @@
                 </criticalInstructions>
                 <format>
                     The consensus areas identified in this conversation reveal important shared
-                    values across participant groups, despite their differences on other topics.
+                    values across participant tribes, despite their differences on other topics.
                     Most notably, the widespread agreement on [primary_consensus_topic] suggests
-                    that [shared_value_interpretation], even among groups that disagree sharply
+                    that [shared_value_interpretation], even among tribes that disagree sharply
                     on [divisive_topic]. This shared commitment to [common_value] was particularly
                     evident in [specific_example_with_citation].
 
                     Another important area of common ground emerged around [secondary_consensus_topic],
-                    where agreement across groups indicated shared [another_common_value]. Despite
-                    differing approaches to [related_divisive_topic], participants from all groups
+                    where agreement across tribes indicated shared [another_common_value]. Despite
+                    differing approaches to [related_divisive_topic], participants from all tribes
                     expressed support for [specific_position], as seen in [another_specific_example].
                     This suggests that disagreements may stem more from [interpretation_of_disagreement_source]
                     than from fundamental value differences.
 
                     These consensus areas potentially offer valuable starting points for bridge-building
-                    between otherwise divided groups. The shared commitment to [key_shared_value]
+                    between otherwise divided tribes. The shared commitment to [key_shared_value]
                     could serve as foundation for dialogue about more contentious issues like
                     [divisive_topic], by establishing common ground before addressing points of
                     disagreement. Similarly, the broad agreement on [practical_consensus_area]
@@ -248,17 +256,19 @@
     </analysisProcess>
 
     <validationRules>
-        <rule>All claims about consensus must be based on agreement data across groups</rule>
+        <rule>All claims about consensus must be based on agreement data across tribes</rule>
         <rule>Each claim requires at least one citation</rule>
         <rule>Citations must use provided format</rule>
         <rule>Multiple consensus areas must be identified and analyzed</rule>
+        <rule>Before stating any comment failed to achieve consensus, verify its agrees vs disagrees in the data. A comment with majority agrees in all groups IS achieving consensus.</rule>
+        <rule>If the data contains only a few comments, report what the data actually shows rather than generating generic patterns. Do not project expected patterns onto the data.</rule>
     </validationRules>
 
     <responseFormat>
         <condensedJSONSchema>
             {
             "id": "group_informed_consensus",
-            "title": "Areas of Cross-Group Consensus",
+            "title": "Areas of Cross-Tribe Consensus",
             "paragraphs": [
             {
             "id": "string", // e.g. "consensus_overview"
@@ -309,16 +319,16 @@
     <example>
         {
         "id": "group_informed_consensus",
-        "title": "Areas of Cross-Group Consensus",
+        "title": "Areas of Cross-Tribe Consensus",
         "paragraphs": [
         {
         "id": "consensus_overview",
-        "title": "Overview of Cross-Group Consensus",
+        "title": "Overview of Cross-Tribe Consensus",
         "sentences": [
         {
         "clauses": [
         {
-        "text": "Analysis of voting patterns revealed significant areas of consensus across different participant groups, with 15 comments showing strong agreement that transcended group divisions.",
+        "text": "Analysis of voting patterns revealed significant areas of consensus across different participant tribes, with 15 comments showing strong agreement that transcended tribe divisions.",
         "citations": [12, 15, 23]
         }
         ]
@@ -332,7 +342,7 @@
         {
         "clauses": [
         {
-        "text": "The strongest area of cross-group agreement centered on environmental protection, with statements supporting conservation efforts receiving high approval from all groups.",
+        "text": "The strongest area of cross-tribe agreement centered on environmental protection, with statements supporting conservation efforts receiving high approval from all tribes.",
         "citations": [25, 31, 45]
         },
         {

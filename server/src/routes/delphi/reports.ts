@@ -137,8 +137,13 @@ export async function handle_GET_delphi_reports(req: Request, res: Response) {
       reportsByJobId[itemJobId].push(item);
     });
 
-    // Sort job runs by the latest timestamp within each job group (most recent job first)
+    // Sort job runs: prefer most complete (highest section count), then most recent timestamp as tiebreaker
     const sortedJobIds = Object.keys(reportsByJobId).sort((jobA, jobB) => {
+      const countA = reportsByJobId[jobA].length;
+      const countB = reportsByJobId[jobB].length;
+      // Primary sort: more sections = more complete = preferred
+      if (countA !== countB) return countB - countA;
+      // Secondary sort: most recent timestamp breaks ties
       const latestTimestampA = reportsByJobId[jobA].reduce(
         (latest, item) => (item.timestamp > latest ? item.timestamp : latest),
         ""
@@ -189,7 +194,7 @@ export async function handle_GET_delphi_reports(req: Request, res: Response) {
     logger.info(
       `Found ${
         Object.keys(reportsByJobId).length
-      } report runs, using most recent from ${mostRecentRunKey}`
+      } report runs, selected run ${currentRunJobId} (${itemsToProcess.length} sections) from ${mostRecentRunKey}`
     );
 
     const reportsBySection: Record<string, any> = {};

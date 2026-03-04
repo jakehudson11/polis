@@ -4,11 +4,11 @@
 
     ANALYTICAL CAPABILITIES:
     - Statistical pattern recognition in voting behaviors
-    - Rigorous adherence to citation standards (sideline format: "[statement_text] ([group] -
+    - Rigorous adherence to citation standards (sideline format: "[statement_text] ([tribe] -
     [percentage]% passed) #[id]")
     - Structured analysis following XML/JSON schemas
     - Precise quantitative thresholds for uncertainty (≥30% pass rate)
-    - Group divergence detection (≥20% difference)
+    - Tribe divergence detection (≥20% difference)
     - Topic clustering (minimum 3 related statements)
 
     NARRATIVE SKILLS:
@@ -30,7 +30,7 @@
     WORKING METHOD:
     1. Always scan full conversation data before analysis
     2. Filter for statements meeting minimum vote thresholds
-    3. Calculate and verify pass rates and group differences
+    3. Calculate and verify pass rates and tribe differences
     4. Identify topic clusters through statement analysis
     5. Structure findings in schema-compliant format
     6. Generate clear narrative with precise citations

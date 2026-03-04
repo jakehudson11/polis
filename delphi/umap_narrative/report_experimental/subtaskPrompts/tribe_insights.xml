@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <polisAnalysisPrompt version="1.0">
     <metadata>
-        <title>Guide to Analyzing and Reporting A SINGLE TRIBE (Group) in Pol.is Conversations</title>
-        <purpose>Generate a consistent, evidence-based narrative report for one tribe/group and output valid JSON</purpose>
+        <title>Guide to Analyzing and Reporting A SINGLE TRIBE in Pol.is Conversations</title>
+        <purpose>Generate a consistent, evidence-based narrative report for one tribe and output valid JSON</purpose>
     </metadata>
 
     <system>
-        <instruction>You are an expert neutral analyst explaining one tribe/group in a Pol.is conversation.</instruction>
-        <instruction>Base every claim on the provided data: tribe comments, voting patterns, and comparison-to-other-groups information.</instruction>
-        <instruction>Write like the existing topic/group narrative subtasks: clear, evidence-based, and structured.</instruction>
+        <instruction>You are an expert neutral analyst explaining one tribe in a Pol.is conversation.</instruction>
+        <instruction>Base every claim on the provided data: tribe comments, voting patterns, and comparison-to-other-tribes information.</instruction>
+        <instruction>Write like the existing topic/tribe narrative subtasks: clear, evidence-based, and structured.</instruction>
     </system>
 
     <criticalInstructions>
@@ -24,6 +24,9 @@
             Your output MUST be valid JSON. Do not use comments or trailing commas in the JSON.
         </instruction>
         <instruction>
+            CRITICAL DATA VERIFICATION: Prioritize statements where this tribe's voting pattern MOST DIFFERS from other tribes. The most characteristic statements for a tribe are those with the largest gap between this tribe's agreement rate and the overall rate. Check the per-group vote data to identify these distinctive statements rather than just citing the most-voted ones.
+        </instruction>
+        <instruction>
             Include citations by referencing specific comment IDs in each clause's citations array (e.g., [123, 456]).
         </instruction>
         <instruction>
@@ -36,13 +39,13 @@
 
     <definitions>
         <term name="tribe">
-            <description>A single cluster/group of participants with similar voting patterns within the conversation</description>
+            <description>A single cluster of participants with similar voting patterns within the conversation</description>
         </term>
         <term name="within_tribe_consensus">
             <description>Statements where this tribe shows strong internal agreement or disagreement</description>
         </term>
         <term name="between_group_difference">
-            <description>Statements where this tribe's voting differs notably from other groups, indicating a distinctive viewpoint</description>
+            <description>Statements where this tribe's voting differs notably from other tribes, indicating a distinctive viewpoint</description>
             <threshold>30</threshold>
             <unit>percent</unit>
         </term>
@@ -126,7 +129,7 @@
                 </elements>
                 <criticalInstructions>
                     <instruction>
-                        Explain how this tribe differs from other groups: what they consistently support/oppose that others do not.
+                        Explain how this tribe differs from other tribes: what they consistently support/oppose that others do not.
                     </instruction>
                     <instruction>
                         When describing differences, focus on the underlying reasoning/values suggested by their comments, not just disagreement.
@@ -198,7 +201,7 @@
 
     <validationRules>
         <rule>Each clause must include at least one citation to a specific comment ID</rule>
-        <rule>All claims about group positions must be grounded in voting patterns and representative comments</rule>
+        <rule>All claims about tribe positions must be grounded in voting patterns and representative comments</rule>
         <rule>Do not invent demographic attributes; only include them if explicitly present in the provided data</rule>
         <rule>Output must be valid JSON and match the schema</rule>
     </validationRules>
@@ -264,12 +267,12 @@
         "paragraphs": [
         {
         "id": "tribe_who_they_are",
-        "title": "Who This Group Represents",
+        "title": "Who This Tribe Represents",
         "sentences": [
         {
         "clauses": [
         {
-        "text": "This group emphasizes pragmatic solutions and tends to weigh tradeoffs between impact and feasibility.",
+        "text": "This tribe emphasizes pragmatic solutions and tends to weigh tradeoffs between impact and feasibility.",
         "citations": [101, 115, 204]
         },
         {
@@ -296,12 +299,12 @@
         },
         {
         "id": "tribe_distinctive_positions",
-        "title": "How They Differ From Other Groups",
+        "title": "How They Differ From Other Tribes",
         "sentences": [
         {
         "clauses": [
         {
-        "text": "Compared with other groups, they are more skeptical of symbolic measures and prioritize enforceable commitments.",
+        "text": "Compared with other tribes, they are more skeptical of symbolic measures and prioritize enforceable commitments.",
         "citations": [204, 221]
         }
         ]
