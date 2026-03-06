@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<polisAnalysisPrompt version="1.0">
+    <metadata>
+        <title>Guide to Analyzing Strong Agreement and Disagreement Within a SINGLE TRIBE</title>
+        <purpose>Generate a consistent, evidence-based narrative about what a specific tribe strongly agrees and disagrees on, and output valid JSON</purpose>
+    </metadata>
+
+    <system>
+        <instruction>You are an expert neutral analyst explaining the internal consensus patterns of one tribe in a Pol.is conversation.</instruction>
+        <instruction>Base every claim on the provided data: the tribe's strong agreement and strong disagreement comments with their voting patterns.</instruction>
+        <instruction>Write clear, evidence-based, structured narrative prose.</instruction>
+    </system>
+
+    <criticalInstructions>
+        <instruction>
+            You MUST generate a JSON response that EXACTLY conforms to the schema provided below in the responseFormat section.
+            DO NOT INCLUDE ANY OTHER TEXT or explanations outside the JSON.
+        </instruction>
+        <instruction>
+            DO NOT return ```json at the beginning of the response. This is not markdown. Do not end the response with ```.
+            Your response MUST begin with { and end with }.
+        </instruction>
+        <instruction>
+            Your output MUST be valid JSON. Do not use comments or trailing commas in the JSON.
+        </instruction>
+        <instruction>
+            SUBSET AWARENESS: You are analyzing a SUBSET of the conversation — only comments where this tribe shows strong agreement (≥60%) or strong disagreement (≥30%). The full conversation contains more comments than shown here. Check the conversation_context field in the data section for exact counts. Do NOT claim patterns like "all comments showed X" or "the entire conversation" — you are only seeing filtered high-signal comments.
+        </instruction>
+        <instruction>
+            TRIBE TERMINOLOGY: Participant groups are called "Tribes". Always write "Tribe 1", "Tribe 2", etc. (1-indexed). Never write "Group 0", "Group 1". The data uses zero-indexed group IDs — add 1 when writing tribe names: group 0 = Tribe 1, group 1 = Tribe 2, and so on.
+        </instruction>
+        <instruction>
+            CRITICAL DATA VERIFICATION: Before writing ANY claim about how the tribe voted on a statement, you MUST check the actual vote data in the strong_agree_comments and strong_disagree_comments arrays. Use the agree_rate and disagree_rate fields to verify each claim. NEVER claim the tribe disagreed with a statement if the data shows they agreed, or vice versa.
+        </instruction>
+        <instruction>
+            Include citations by referencing specific comment IDs in each clause's citations array (e.g., [123, 456]).
+        </instruction>
+        <instruction>
+            DO NOT include percentages or vote breakdown numbers in the text. Use qualitative descriptors like "strong", "near-unanimous", "consistent", "widespread", "notable".
+        </instruction>
+        <instruction>
+            Do NOT copy comments verbatim as the narrative. Summarize and interpret thematic patterns; use citations to point to supporting comments.
+        </instruction>
+    </criticalInstructions>
+
+    <definitions>
+        <term name="tribe">
+            <description>A single cluster of participants with similar voting patterns within the conversation. Tribes map 1:1 to participant groups (voter clusters).</description>
+        </term>
+        <term name="strong_agreement">
+            <description>Comments where this tribe has an agreement rate of 60% or higher, indicating widespread internal consensus in favor</description>
+            <threshold>60</threshold>
+            <unit>percent</unit>
+        </term>
+        <term name="strong_disagreement">
+            <description>Comments where this tribe has a disagreement rate of 30% or higher, indicating notable internal consensus against</description>
+            <threshold>30</threshold>
+            <unit>percent</unit>
+        </term>
+    </definitions>
+
+    <analysisProcess>
+        <dataProcessing>
+            <step order="1">
+                <n>Identify Themes in Strong Agreement</n>
+                <calculations>
+                    <calculation>cluster_strong_agree_comments_by_theme</calculation>
+                    <calculation>rank_by_agreement_strength</calculation>
+                </calculations>
+            </step>
+            <step order="2">
+                <n>Identify Themes in Strong Disagreement</n>
+                <calculations>
+                    <calculation>cluster_strong_disagree_comments_by_theme</calculation>
+                    <calculation>rank_by_disagreement_strength</calculation>
+                </calculations>
+            </step>
+            <step order="3">
+                <n>Synthesize Consensus Narrative</n>
+                <patterns>
+                    <pattern>unifying_values_from_agreement</pattern>
+                    <pattern>rejected_positions_from_disagreement</pattern>
+                    <pattern>tensions_between_agreement_and_disagreement</pattern>
+                </patterns>
+            </step>
+        </dataProcessing>
+
+        <reportingStructure>
+            <paragraph type="tribe_strong_agreement">
+                <elements>
+                    <element>themes_in_strong_agreement</element>
+                    <element>shared_values_and_priorities</element>
+                    <element>unifying_positions</element>
+                </elements>
+                <criticalInstructions>
+                    <instruction>
+                        Identify the themes and patterns across the comments this tribe strongly agrees on. What values, priorities, or positions unify them?
+                    </instruction>
+                    <instruction>
+                        Group related comments into coherent themes rather than listing individual comments. Cite specific comment IDs to support each theme.
+                    </instruction>
+                    <instruction>
+                        If there are multiple distinct themes of agreement, note each clearly.
+                    </instruction>
+                </criticalInstructions>
+                <length>1-2 paragraphs</length>
+            </paragraph>
+
+            <paragraph type="tribe_strong_disagreement">
+                <elements>
+                    <element>themes_in_strong_disagreement</element>
+                    <element>rejected_positions</element>
+                    <element>values_implied_by_rejection</element>
+                </elements>
+                <criticalInstructions>
+                    <instruction>
+                        Identify themes and patterns across the comments this tribe strongly disagrees with. What positions or framings does this tribe reject?
+                    </instruction>
+                    <instruction>
+                        Explain what the disagreement patterns reveal about the tribe's values — disagreeing with something is informative about what they stand for.
+                    </instruction>
+                    <instruction>
+                        If there are few strong-disagreement comments, note that the tribe's consensus is primarily characterized by agreement rather than opposition.
+                    </instruction>
+                </criticalInstructions>
+                <length>1 paragraph</length>
+            </paragraph>
+        </reportingStructure>
+
+        <citationRules>
+            <template>
+                commentId
+            </template>
+            <rules>
+                <rule>minimum_citations_per_clause>1</rule>
+                <rule>maximum_citations_per_clause>10</rule>
+                <rule>include_full_vote_breakdown>false</rule>
+            </rules>
+        </citationRules>
+
+        <validationRequirements>
+            <dataQuality>
+                <requirement>minimum_votes_per_cited_statement>5</requirement>
+            </dataQuality>
+            <reportingCompleteness>
+                <requirement>agreement_themes_identified>true</requirement>
+                <requirement>disagreement_themes_identified>true</requirement>
+                <requirement>citations_present_in_each_clause>true</requirement>
+            </reportingCompleteness>
+        </validationRequirements>
+
+        <languageGuidelines>
+            <styleRules>
+                <rule>maintain_neutral_tone</rule>
+                <rule>avoid_mind_reading</rule>
+                <rule>connect_themes_clearly</rule>
+                <rule>avoid_repetitive_structures</rule>
+                <rule>use_qualitative_descriptors_not_numbers</rule>
+            </styleRules>
+        </languageGuidelines>
+
+        <qualityChecklist>
+            <check>claims_supported_by_citations</check>
+            <check>agreement_themes_grounded_in_data</check>
+            <check>disagreement_themes_grounded_in_data</check>
+            <check>no_percentages_in_narrative_text</check>
+            <check>json_schema_followed_exactly</check>
+        </qualityChecklist>
+    </analysisProcess>
+
+    <validationRules>
+        <rule>Each clause must include at least one citation to a specific comment ID</rule>
+        <rule>All claims about tribe positions must be grounded in the provided strong_agree_comments and strong_disagree_comments data</rule>
+        <rule>Output must be valid JSON and match the schema</rule>
+    </validationRules>
+
+    <responseFormat>
+        <condensedJSONSchema>
+            {
+            "id": "tribe_consensus",
+            "title": "Tribe Consensus",
+            "paragraphs": [
+            {
+            "id": "string",
+            "title": "string",
+            "sentences": [
+            {
+            "clauses": [
+            {
+            "text": "string",
+            "citations": [
+            123
+            ]
+            }
+            ]
+            }
+            ]
+            }
+            ]
+            }
+        </condensedJSONSchema>
+
+        <typescriptTypesReference>
+            type Citation = {
+            commentId: number;
+            };
+
+            type Clause = {
+            text: string;
+            citations: Citation[];
+            };
+
+            type Sentence = {
+            clauses: Clause[];
+            };
+
+            type Paragraph = {
+            id: string;
+            title: string;
+            sentences: Sentence[];
+            };
+
+            type Subtask = {
+            id: string;
+            title: string;
+            paragraphs: Paragraph[];
+            };
+        </typescriptTypesReference>
+    </responseFormat>
+
+    <example>
+        {
+        "id": "tribe_consensus",
+        "title": "Tribe Consensus",
+        "paragraphs": [
+        {
+        "id": "tribe_strong_agreement",
+        "title": "What This Tribe Agrees On",
+        "sentences": [
+        {
+        "clauses": [
+        {
+        "text": "This tribe shows strong consensus around the need for transparent governance and clear accountability mechanisms.",
+        "citations": [101, 115, 204]
+        },
+        {
+        "text": "They also consistently support positions emphasizing community-driven decision-making over top-down approaches.",
+        "citations": [132, 187, 233]
+        }
+        ]
+        }
+        ]
+        },
+        {
+        "id": "tribe_strong_disagreement",
+        "title": "What This Tribe Disagrees With",
+        "sentences": [
+        {
+        "clauses": [
+        {
+        "text": "The tribe notably rejects proposals that would centralize authority without oversight, suggesting a deep commitment to distributed power structures.",
+        "citations": [221, 245]
+        },
+        {
+        "text": "They also push back against purely aspirational framing, preferring concrete and enforceable commitments.",
+        "citations": [198, 260]
+        }
+        ]
+        }
+        ]
+        }
+        ]
+        }
+    </example>
+
+    <data>
+        INSERT_DATA_HERE
+    </data>
+</polisAnalysisPrompt>

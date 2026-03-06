@@ -187,7 +187,7 @@ class PolisConverter:
             
             # Add data for each group
             for group_id in group_keys:
-                group = ET.SubElement(comment, f"group-{group_id}", {
+                group = ET.SubElement(comment, f"tribe-{group_id}", {
                     "votes": str(record.get(f"group-{group_id}-votes", 0)),
                     "agrees": str(record.get(f"group-{group_id}-agrees", 0)),
                     "disagrees": str(record.get(f"group-{group_id}-disagrees", 0)),
@@ -379,6 +379,8 @@ class BatchReportGenerator:
                     if comment_id in consensus_map:
                         record['group_aware_consensus'] = consensus_map.get(comment_id, 0)
 
+                logger.info(f"Extremity override: {len(extremity_map)} mapped, "
+                            f"{sum(1 for v in extremity_map.values() if v > 1.0)} exceed 1.0")
                 logger.info(
                     f"Applied Clojure math_main-derived metrics to {len(processed_comments)} exported comments"
                 )
@@ -585,48 +587,7 @@ class BatchReportGenerator:
                     }
                     all_topics.append(topic)
 
-                # --- Add tribe sections for ALL clusters at this layer ---
-                # Tribe sections are generated for every cluster_id seen in comment assignments, even if it lacks a topic name.
-                def _cluster_sort_key(cid):
-                    try:
-                        return (0, int(cid))
-                    except (TypeError, ValueError):
-                        return (1, str(cid))
-
-                for cluster_id in sorted(topic_comments.keys(), key=_cluster_sort_key):
-                    if cluster_id is None:
-                        continue
-
-                    # Stable identifiers
-                    tribe_topic_key = f"tribe_{layer_id}_{cluster_id}"
-                    tribe_title_section_name = f"{self.job_id}_tribe_{layer_id}_{cluster_id}_title"
-                    tribe_insights_section_name = f"{self.job_id}_tribe_{layer_id}_{cluster_id}_insights"
-
-                    # Use existing topic name as a human-readable label when available
-                    tribe_display_name = topic_name_by_cluster_id.get(cluster_id, f"Tribe {cluster_id}")
-
-                    all_topics.append({
-                        "section_type": "tribe_title",
-                        "layer_id": layer_id,
-                        "cluster_id": cluster_id,
-                        "group_id": cluster_id,
-                        "name": tribe_display_name,
-                        "topic_key": tribe_topic_key,
-                        "section_name": tribe_title_section_name,
-                        "citations": topic_comments.get(cluster_id, []),
-                        "sample_comments": []
-                    })
-                    all_topics.append({
-                        "section_type": "tribe_insights",
-                        "layer_id": layer_id,
-                        "cluster_id": cluster_id,
-                        "group_id": cluster_id,
-                        "name": tribe_display_name,
-                        "topic_key": tribe_topic_key,
-                        "section_name": tribe_insights_section_name,
-                        "citations": topic_comments.get(cluster_id, []),
-                        "sample_comments": []
-                    })
+                # (Tribe sections are now generated per participant group in prepare_batch_requests)
 
             # --- Step 3: Add global sections ---
             if not self.job_id:
@@ -719,7 +680,7 @@ class BatchReportGenerator:
             if filter_type == "comment_extremity":
                 # Filter for comments that divide opinion groups (extremity > 1.0)
                 extremity = comment.get('comment_extremity', 0)
-                return extremity > filter_threshold
+                return extremity >= filter_threshold
                 
             elif filter_type == "group_aware_consensus":
                 # Filter for comments with broad cross-group agreement
@@ -755,7 +716,7 @@ class BatchReportGenerator:
                 else:
                     threshold = filter_threshold
                     
-                return consensus > threshold
+                return consensus >= threshold
                 
             elif filter_type == "uncertainty_ratio":
                 # Filter for comments with high uncertainty/unsure responses (>= 20% pass votes)
@@ -1013,8 +974,184 @@ class BatchReportGenerator:
         except Exception:
             return {}
 
-    def _select_representative_comments_for_tribe(self, comments: List[Dict[str, Any]], limit: int, tribe_group_id: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Rank comments for tribe sections by distinctiveness and participation."""
+    def _get_participant_group_ids(self, conversation_data: Dict[str, Any]) -> List[int]:
+        """Extract sorted list of unique participant group IDs from processed comments."""
+        group_ids = set()
+        for record in conversation_data.get('processed_comments', []):
+            for key in record.keys():
+                if isinstance(key, str) and key.startswith('group-') and key.endswith('-votes'):
+                    parts = key.split('-')
+                    if len(parts) >= 3:
+                        try:
+                            group_ids.add(int(parts[1]))
+                        except ValueError:
+                            continue
+        return sorted(group_ids)
+
+    def _select_comments_for_tribe_consensus(self, processed_comments: List[Dict[str, Any]], group_id: int, agree_threshold: float = 0.6, disagree_threshold: float = 0.3, limit: int = 50) -> Dict[str, List[Dict[str, Any]]]:
+        """Select comments with strong group agreement or disagreement.
+
+        Returns dict with 'strong_agree' and 'strong_disagree' lists, each capped at limit.
+        """
+        def _coerce_float(value, default=0.0):
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return float(int(value))
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value.strip())
+                except ValueError:
+                    return default
+            return default
+
+        strong_agree = []
+        strong_disagree = []
+
+        for c in processed_comments:
+            tribe_votes = _coerce_float(c.get(f'group-{group_id}-votes', 0))
+            if tribe_votes <= 0:
+                continue
+            tribe_agrees = _coerce_float(c.get(f'group-{group_id}-agrees', 0))
+            tribe_disagrees = _coerce_float(c.get(f'group-{group_id}-disagrees', 0))
+            agree_rate = tribe_agrees / tribe_votes
+            disagree_rate = tribe_disagrees / tribe_votes
+
+            entry = {
+                "comment_id": c.get('comment_id', c.get('comment-id')),
+                "text": c.get('comment', ''),
+                "agree_rate": round(agree_rate, 4),
+                "disagree_rate": round(disagree_rate, 4),
+                "tribe_agrees": int(tribe_agrees),
+                "tribe_disagrees": int(tribe_disagrees),
+                "tribe_votes": int(tribe_votes),
+            }
+
+            if agree_rate >= agree_threshold:
+                strong_agree.append(entry)
+            if disagree_rate >= disagree_threshold:
+                strong_disagree.append(entry)
+
+        strong_agree.sort(key=lambda x: x['agree_rate'], reverse=True)
+        strong_disagree.sort(key=lambda x: x['disagree_rate'], reverse=True)
+
+        return {
+            "strong_agree": strong_agree[:limit],
+            "strong_disagree": strong_disagree[:limit],
+        }
+
+    def _select_comments_for_tribe_characteristics(self, processed_comments: List[Dict[str, Any]], group_id: int, limit: int = 30, math_data: dict = None) -> List[Dict[str, Any]]:
+        """Select comments that most characteristically represent this group.
+
+        Uses Clojure repness scores when available (preferred), falling back to
+        a simple distinctiveness heuristic based on agree-rate difference.
+
+        Returns list sorted by representativeness descending, capped at limit.
+        """
+        def _coerce_float(value, default=0.0):
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return float(int(value))
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value.strip())
+                except ValueError:
+                    return default
+            return default
+
+        # --- Primary path: Clojure repness from math_main ---
+        if math_data and isinstance(math_data, dict):
+            repness_all = math_data.get('repness', {})
+            group_repness = repness_all.get(str(group_id), [])
+            if group_repness:
+                # Build a lookup from tid -> original comment record for enrichment
+                comment_by_tid = {}
+                for c in processed_comments:
+                    cid = c.get('comment_id', c.get('comment-id'))
+                    if cid is not None:
+                        comment_by_tid[int(cid)] = c
+
+                results = []
+                for entry in group_repness:
+                    repful_for = entry.get('repful-for', 'agree')
+                    score = _coerce_float(entry.get('repness', 0))
+                    if score < 1.0:
+                        continue
+                    tid = int(entry.get('tid', -1))
+                    original = comment_by_tid.get(tid, {})
+
+                    tribe_votes = _coerce_float(original.get(f'group-{group_id}-votes', 0))
+                    overall_votes = _coerce_float(original.get('votes', original.get('total-votes', 0)))
+                    tribe_agrees = _coerce_float(original.get(f'group-{group_id}-agrees', 0))
+                    overall_agrees = _coerce_float(original.get('agrees', original.get('total-agrees', 0)))
+                    tribe_agree_rate = (tribe_agrees / tribe_votes) if tribe_votes > 0 else 0.0
+                    overall_agree_rate = (overall_agrees / overall_votes) if overall_votes > 0 else 0.0
+
+                    results.append({
+                        "comment_id": tid,
+                        "text": original.get('comment', ''),
+                        "repful_for": repful_for,
+                        "distinctiveness_score": round(score, 4),
+                        "tribe_agree_rate": round(tribe_agree_rate, 4),
+                        "overall_agree_rate": round(overall_agree_rate, 4),
+                        "tribe_agrees": int(tribe_agrees),
+                        "tribe_votes": int(tribe_votes),
+                        "overall_votes": int(overall_votes),
+                    })
+
+                results.sort(key=lambda x: x['distinctiveness_score'], reverse=True)
+                agree_count = sum(1 for r in results if r.get('repful_for') == 'agree')
+                disagree_count = len(results) - agree_count
+                logger.info(f"Tribe {group_id} characteristics: {len(results)} comments from Clojure repness (>= 1.0) — {agree_count} agree, {disagree_count} disagree")
+                return results[:limit]
+
+        # --- Fallback: simple distinctiveness heuristic ---
+        logger.info(f"Tribe {group_id} characteristics: falling back to agree-rate distinctiveness (no Clojure repness)")
+        results = []
+        for c in processed_comments:
+            tribe_votes = _coerce_float(c.get(f'group-{group_id}-votes', 0))
+            overall_votes = _coerce_float(c.get('votes', c.get('total-votes', 0)))
+            if tribe_votes <= 0 or overall_votes <= 0:
+                continue
+            tribe_agrees = _coerce_float(c.get(f'group-{group_id}-agrees', 0))
+            overall_agrees = _coerce_float(c.get('agrees', c.get('total-agrees', 0)))
+            tribe_agree_rate = tribe_agrees / tribe_votes
+            overall_agree_rate = overall_agrees / overall_votes
+            distinctiveness = abs(tribe_agree_rate - overall_agree_rate)
+
+            results.append({
+                "comment_id": c.get('comment_id', c.get('comment-id')),
+                "text": c.get('comment', ''),
+                "distinctiveness_score": round(distinctiveness, 4),
+                "tribe_agree_rate": round(tribe_agree_rate, 4),
+                "overall_agree_rate": round(overall_agree_rate, 4),
+                "tribe_agrees": int(tribe_agrees),
+                "tribe_votes": int(tribe_votes),
+                "overall_votes": int(overall_votes),
+            })
+
+        results.sort(key=lambda x: x['distinctiveness_score'], reverse=True)
+        return results[:limit]
+
+    def _build_tribe_payload(self,
+                             conversation_data: Dict[str, Any],
+                             group_id: int,
+                             payload_type: str,
+                             comment_limit: int = 50) -> Dict[str, Any]:
+        """Build the data payload for tribe_* templates.
+
+        Args:
+            conversation_data: Full conversation data dict.
+            group_id: Participant group ID (0-based).
+            payload_type: One of 'title', 'consensus', 'characteristics'.
+            comment_limit: Maximum comments to include per selection list.
+        """
+        processed_comments = conversation_data.get('processed_comments', [])
 
         def _coerce_float(value, default=0.0):
             if value is None:
@@ -1030,147 +1167,87 @@ class BatchReportGenerator:
                     return default
             return default
 
-        def _score(record: Dict[str, Any]) -> Tuple[float, float, float]:
-            votes = _coerce_float(record.get('votes', record.get('total-votes', 0)), 0.0)
-            agrees = _coerce_float(record.get('agrees', record.get('total-agrees', 0)), 0.0)
-            disagrees = _coerce_float(record.get('disagrees', record.get('total-disagrees', 0)), 0.0)
+        # Aggregate tribe-level stats across all comments
+        tribe_total_votes = 0
+        tribe_total_agrees = 0
+        tribe_total_disagrees = 0
+        for c in processed_comments:
+            tribe_total_votes += int(_coerce_float(c.get(f'group-{group_id}-votes', 0)))
+            tribe_total_agrees += int(_coerce_float(c.get(f'group-{group_id}-agrees', 0)))
+            tribe_total_disagrees += int(_coerce_float(c.get(f'group-{group_id}-disagrees', 0)))
 
-            # If tribe_group_id is available, compute distinctiveness
-            distinctiveness = 0.0
-            if tribe_group_id is not None:
-                tribe_votes = _coerce_float(record.get(f'group-{tribe_group_id}-votes', 0), 0.0)
-                tribe_agrees = _coerce_float(record.get(f'group-{tribe_group_id}-agrees', 0), 0.0)
-                # Tribe's agreement rate
-                tribe_agree_rate = (tribe_agrees / tribe_votes) if tribe_votes > 0 else 0.5
-                # Overall agreement rate
-                overall_agree_rate = (agrees / votes) if votes > 0 else 0.5
-                # Distinctiveness: how much this tribe differs from overall
-                distinctiveness = abs(tribe_agree_rate - overall_agree_rate)
-
-            consensus_strength = max(agrees, disagrees) / max(votes, 1.0)
-            engagement = agrees + disagrees
-            # Primary: distinctiveness, secondary: engagement, tertiary: consensus
-            return (distinctiveness, engagement, consensus_strength)
-
-        if len(comments) <= limit:
-            return comments
-
-        sorted_comments = sorted(comments, key=_score, reverse=True)
-        return sorted_comments[:limit]
-
-    def _build_tribe_payload(self,
-                             conversation_data: Dict[str, Any],
-                             layer_id: int,
-                             group_id: Union[int, str],
-                             comment_limit: int,
-                             include_comparison: bool) -> Dict[str, Any]:
-        """Build the data payload for tribe_* templates."""
-        # Filter comments for this tribe using cluster assignments
-        filter_args = {
-            'topic_cluster_id': group_id,
-            'topic_layer_id': layer_id,
-            'topic_citations': [],
-            'sample_comments': []
-        }
-        tribe_comments = self._filter_processed_comments(conversation_data, self.filter_topics, filter_args)
-
-        # Representative subset (ranked)
-        representative = self._select_representative_comments_for_tribe(tribe_comments, comment_limit, tribe_group_id=int(group_id) if str(group_id).isdigit() else None)
-
-        structured_comments_xml = PolisConverter.convert_to_xml(representative) if representative else ""
-
-        def _coerce_int(value, default=0):
-            if value is None:
-                return default
-            if isinstance(value, bool):
-                return int(value)
-            if isinstance(value, (int, float)):
-                return int(value)
-            if isinstance(value, str):
-                try:
-                    return int(float(value.strip()))
-                except ValueError:
-                    return default
-            return default
-
-        tribe_total_votes = sum(_coerce_int(c.get('votes', c.get('total-votes', 0))) for c in tribe_comments)
-        tribe_total_agrees = sum(_coerce_int(c.get('agrees', c.get('total-agrees', 0))) for c in tribe_comments)
-        tribe_total_disagrees = sum(_coerce_int(c.get('disagrees', c.get('total-disagrees', 0))) for c in tribe_comments)
-        tribe_total_passes = sum(_coerce_int(c.get('passes', c.get('total-passes', 0))) for c in tribe_comments)
-        tribe_total_comments = len(tribe_comments)
-
-        # Simple aggregate rates (kept numeric in the payload; templates instruct the model not to print raw numbers)
         tribe_agree_rate = (tribe_total_agrees / tribe_total_votes) if tribe_total_votes else 0.0
         tribe_disagree_rate = (tribe_total_disagrees / tribe_total_votes) if tribe_total_votes else 0.0
-        tribe_pass_rate = (tribe_total_passes / tribe_total_votes) if tribe_total_votes else 0.0
-
-        # Consensus strength averaged across comments (unweighted and vote-weighted)
-        def _comment_consensus_strength(record: Dict[str, Any]) -> float:
-            votes = max(_coerce_int(record.get('votes', record.get('total-votes', 0))), 0)
-            agrees = max(_coerce_int(record.get('agrees', record.get('total-agrees', 0))), 0)
-            disagrees = max(_coerce_int(record.get('disagrees', record.get('total-disagrees', 0))), 0)
-            return (max(agrees, disagrees) / votes) if votes else 0.0
-
-        if tribe_comments:
-            strengths = [_comment_consensus_strength(c) for c in tribe_comments]
-            avg_consensus_strength = float(np.mean(strengths)) if strengths else 0.0
-            weighted_strengths = [
-                _comment_consensus_strength(c) * max(_coerce_int(c.get('votes', c.get('total-votes', 0))), 0)
-                for c in tribe_comments
-            ]
-            vote_sum = sum(max(_coerce_int(c.get('votes', c.get('total-votes', 0))), 0) for c in tribe_comments)
-            vote_weighted_consensus_strength = (sum(weighted_strengths) / vote_sum) if vote_sum else 0.0
-        else:
-            avg_consensus_strength = 0.0
-            vote_weighted_consensus_strength = 0.0
 
         export_data = conversation_data.get('export_data', {})
         participant_sizes = self._count_participants_by_group(export_data)
 
-        summary_tribe = self._summarize_participant_groups(tribe_comments)
         payload: Dict[str, Any] = {
             "tribe": {
-                "layer_id": layer_id,
-                "group_id": int(group_id) if isinstance(group_id, (int, float, str)) and str(group_id).isdigit() else group_id,
-                "comment_count": tribe_total_comments,
-                "total_votes": tribe_total_votes,
-                "total_agrees": tribe_total_agrees,
-                "total_disagrees": tribe_total_disagrees,
-                "total_passes": tribe_total_passes,
-                "agree_rate": tribe_agree_rate,
-                "disagree_rate": tribe_disagree_rate,
-                "pass_rate": tribe_pass_rate,
-                "avg_comment_consensus_strength": avg_consensus_strength,
-                "vote_weighted_comment_consensus_strength": vote_weighted_consensus_strength,
-                "participant_group_sizes": participant_sizes,
-                "participant_group_vote_summary": summary_tribe
+                "group_id": group_id,
+                "participant_count": participant_sizes.get(group_id, 0),
+                "total_comments": len(processed_comments),
+                "agree_rate": round(tribe_agree_rate, 4),
+                "disagree_rate": round(tribe_disagree_rate, 4),
             },
-            "representative_comment_sample": [
-                {
-                    "comment_id": _coerce_int(r.get('comment_id', r.get('comment-id'))),
-                    "votes": _coerce_int(r.get('votes', r.get('total-votes', 0))),
-                    "agrees": _coerce_int(r.get('agrees', r.get('total-agrees', 0))),
-                    "disagrees": _coerce_int(r.get('disagrees', r.get('total-disagrees', 0))),
-                    "passes": _coerce_int(r.get('passes', r.get('total-passes', 0))),
-                    "text": r.get('comment', ''),
-                    "tribe_agrees": _coerce_int(r.get(f'group-{group_id}-agrees', 0)),
-                    "tribe_disagrees": _coerce_int(r.get(f'group-{group_id}-disagrees', 0)),
-                    "tribe_votes": _coerce_int(r.get(f'group-{group_id}-votes', 0)),
-                }
-                for r in representative
-            ],
-            "structured_comments": structured_comments_xml
         }
 
-        if include_comparison:
+        # Route by payload_type to select comments and build type-specific keys
+        if payload_type == 'consensus':
+            consensus = self._select_comments_for_tribe_consensus(processed_comments, group_id, limit=comment_limit)
+            payload["strong_agree_comments"] = consensus["strong_agree"]
+            payload["strong_disagree_comments"] = consensus["strong_disagree"]
+            representative_records = []
+            # Build representative raw records for XML from both lists
+            seen_ids = set()
+            for entry in consensus["strong_agree"] + consensus["strong_disagree"]:
+                cid = entry["comment_id"]
+                if cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+                # Find original record
+                for c in processed_comments:
+                    if c.get('comment_id', c.get('comment-id')) == cid:
+                        representative_records.append(c)
+                        break
+        elif payload_type == 'characteristics':
+            chars = self._select_comments_for_tribe_characteristics(processed_comments, group_id, limit=comment_limit, math_data=conversation_data.get('math_data'))
+            payload["characteristic_comments"] = chars
+            representative_records = []
+            for entry in chars:
+                cid = entry["comment_id"]
+                for c in processed_comments:
+                    if c.get('comment_id', c.get('comment-id')) == cid:
+                        representative_records.append(c)
+                        break
+        else:
+            # 'title' — use characteristics with smaller limit
+            chars = self._select_comments_for_tribe_characteristics(processed_comments, group_id, limit=comment_limit, math_data=conversation_data.get('math_data'))
+            payload["characteristic_comments"] = chars
+            representative_records = []
+            for entry in chars:
+                cid = entry["comment_id"]
+                for c in processed_comments:
+                    if c.get('comment_id', c.get('comment-id')) == cid:
+                        representative_records.append(c)
+                        break
+
+        payload["structured_comments"] = PolisConverter.convert_to_xml(representative_records) if representative_records else ""
+
+        # Conversation context
+        conversation = conversation_data.get('conversation', {})
+        payload["conversation_context"] = {
+            "conversation_id": self.conversation_id,
+            "total_comments": len(processed_comments),
+            "topic": conversation.get('topic', ''),
+        }
+
+        # Comparison data for consensus and characteristics
+        if payload_type in ('consensus', 'characteristics'):
             all_comments = conversation_data.get('processed_comments', [])
             summary_all = self._summarize_participant_groups(all_comments)
-            tribe_comment_ids = set(str(c.get('comment_id', c.get('comment-id'))) for c in tribe_comments)
-            other_comments = [c for c in all_comments if str(c.get('comment_id', c.get('comment-id'))) not in tribe_comment_ids]
-            summary_other = self._summarize_participant_groups(other_comments)
             payload["comparison"] = {
                 "participant_group_vote_summary_all_comments": summary_all,
-                "participant_group_vote_summary_outside_tribe": summary_other
             }
 
         return payload
@@ -1183,7 +1260,7 @@ class BatchReportGenerator:
             
             if not data:
                 logger.error("Received empty conversation data.")
-                return ""
+                return "", 0
             
             # Apply filter if provided
             filtered_comments = data["processed_comments"]
@@ -1256,14 +1333,15 @@ class BatchReportGenerator:
                     filtered_comments = self._select_high_quality_comments(filtered_comments, max_comments)
             
             # Convert to XML
+            filtered_count = len(filtered_comments)
             xml = PolisConverter.convert_to_xml(filtered_comments)
             
-            return xml
+            return xml, filtered_count
         except Exception as e:
             logger.error(f"Error in get_comments_as_xml: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
-            return ""
+            return "", 0
     
     async def prepare_batch_requests(self):
         """Prepare batch requests for all topics."""
@@ -1274,7 +1352,45 @@ class BatchReportGenerator:
             return []
         
         topics = await self.get_topics()
-        
+
+        # --- Add participant-group tribe sections ---
+        group_ids = self._get_participant_group_ids(conversation_data)
+        logger.info(f"Detected {len(group_ids)} participant groups for tribe sections: {group_ids}")
+        for gid in group_ids:
+            topics.append({
+                "section_type": "tribe_title",
+                "section_name": f"{self.job_id}_tribe_g{gid}_title",
+                "topic_key": f"tribe_g{gid}_title",
+                "name": f"Tribe {gid + 1}",
+                "group_id": gid,
+                "layer_id": None,
+                "cluster_id": None,
+                "citations": [],
+                "sample_comments": [],
+            })
+            topics.append({
+                "section_type": "tribe_consensus",
+                "section_name": f"{self.job_id}_tribe_g{gid}_consensus",
+                "topic_key": f"tribe_g{gid}_consensus",
+                "name": f"Tribe {gid + 1}",
+                "group_id": gid,
+                "layer_id": None,
+                "cluster_id": None,
+                "citations": [],
+                "sample_comments": [],
+            })
+            topics.append({
+                "section_type": "tribe_characteristics",
+                "section_name": f"{self.job_id}_tribe_g{gid}_characteristics",
+                "topic_key": f"tribe_g{gid}_characteristics",
+                "name": f"Tribe {gid + 1}",
+                "group_id": gid,
+                "layer_id": None,
+                "cluster_id": None,
+                "citations": [],
+                "sample_comments": [],
+            })
+
         logger.info(f"Preparing batch requests for {len(topics)} topics")
         
         # Read system lore
@@ -1315,7 +1431,8 @@ class BatchReportGenerator:
             # Check section kinds
             is_global_section = section_type == 'global'
             is_tribe_title = section_type == 'tribe_title'
-            is_tribe_insights = section_type == 'tribe_insights'
+            is_tribe_consensus = section_type == 'tribe_consensus'
+            is_tribe_characteristics = section_type == 'tribe_characteristics'
             
             if is_global_section:
                 # Global section - use filter_type and filter_threshold
@@ -1332,10 +1449,17 @@ class BatchReportGenerator:
                 
                 logger.info(f"Global section mapping - name: {topic_name}, filter_type: {filter_type}, "
                            f"filter_threshold: {filter_threshold}, topic_key: {topic_key}")
+            elif is_tribe_title or is_tribe_consensus or is_tribe_characteristics:
+                # Participant-group tribe section — cluster/layer not applicable
+                topic_cluster_id = None
+                topic_layer_id = None
+                filter_args = {}
+                logger.info(f"Tribe section mapping - section_type: {section_type}, group_id: {topic.get('group_id')}, "
+                           f"topic_key: {topic_key}")
             else:
                 # Layer-specific topic - use cluster_id and layer_id
-                topic_cluster_id = topic['cluster_id']
-                topic_layer_id = topic['layer_id']
+                topic_cluster_id = topic.get('cluster_id')
+                topic_layer_id = topic.get('layer_id')
                 
                 # Create filter args for layer-specific topic
                 filter_args = {
@@ -1354,23 +1478,29 @@ class BatchReportGenerator:
             if is_tribe_title:
                 tribe_payload = self._build_tribe_payload(
                     conversation_data,
-                    layer_id=int(topic_layer_id),
-                    group_id=topic_cluster_id,
+                    group_id=int(topic.get('group_id', 0)),
+                    payload_type='title',
                     comment_limit=15,
-                    include_comparison=False,
                 )
                 structured_comments = tribe_payload.get('structured_comments', '')
-            elif is_tribe_insights:
+            elif is_tribe_consensus:
                 tribe_payload = self._build_tribe_payload(
                     conversation_data,
-                    layer_id=int(topic_layer_id),
-                    group_id=topic_cluster_id,
+                    group_id=int(topic.get('group_id', 0)),
+                    payload_type='consensus',
                     comment_limit=50,
-                    include_comparison=True,
+                )
+                structured_comments = tribe_payload.get('structured_comments', '')
+            elif is_tribe_characteristics:
+                tribe_payload = self._build_tribe_payload(
+                    conversation_data,
+                    group_id=int(topic.get('group_id', 0)),
+                    payload_type='characteristics',
+                    comment_limit=30,
                 )
                 structured_comments = tribe_payload.get('structured_comments', '')
             else:
-                structured_comments = await self.get_comments_as_xml(conversation_data, self.filter_topics, filter_args)
+                structured_comments, filtered_count = await self.get_comments_as_xml(conversation_data, self.filter_topics, filter_args)
             
             # Debug logging for topic 0
             if topic_cluster_id == 0 or str(topic_cluster_id) == "0":
@@ -1413,9 +1543,12 @@ class BatchReportGenerator:
             elif is_tribe_title:
                 template_path = self.prompt_base_path / "subtaskPrompts/tribe_title.xml"
                 logger.info(f"Using tribe_title.xml template for tribe title section {section_name}")
-            elif is_tribe_insights:
-                template_path = self.prompt_base_path / "subtaskPrompts/tribe_insights.xml"
-                logger.info(f"Using tribe_insights.xml template for tribe insights section {section_name}")
+            elif is_tribe_consensus:
+                template_path = self.prompt_base_path / "subtaskPrompts/tribe_consensus.xml"
+                logger.info(f"Using tribe_consensus.xml template for tribe consensus section {section_name}")
+            elif is_tribe_characteristics:
+                template_path = self.prompt_base_path / "subtaskPrompts/tribe_characteristics.xml"
+                logger.info(f"Using tribe_characteristics.xml template for tribe characteristics section {section_name}")
             else:
                 # Use topics template for layer-specific topics
                 template_path = self.prompt_base_path / "subtaskPrompts/topics.xml"
@@ -1434,6 +1567,21 @@ class BatchReportGenerator:
                 
                 # Find the data element and replace its content
                 data_payload = {"structured_comments": structured_comments}
+                if is_global_section:
+                    total_comments = len(conversation_data["processed_comments"])
+                    filter_descriptions = {
+                        "comment_extremity": "comments that divide opinion tribes (high extremity)",
+                        "group_aware_consensus": "comments with high cross-tribe consensus",
+                        "uncertainty_ratio": "comments with high uncertainty/pass rates",
+                    }
+                    data_payload["conversation_context"] = (
+                        f"IMPORTANT: This section analyzes a SUBSET of the full conversation. "
+                        f"The conversation contains {total_comments} total comments. "
+                        f"Only {filtered_count} comments are shown here because they met the filter criteria: "
+                        f"{filter_descriptions.get(topic.get('filter_type'), 'filtered comments')}. "
+                        f"Do NOT make claims about 'all comments' or 'the entire conversation' — "
+                        f"you are only seeing the {filtered_count} comments that passed this specific filter."
+                    )
                 if tribe_payload is not None:
                     # Provide extra context for tribe templates without changing the existing request flow.
                     # Keep JSON blobs as strings to avoid xmltodict structural quirks.
@@ -1456,7 +1604,7 @@ class BatchReportGenerator:
                 prompt_xml = xmltodict.unparse(template_dict, pretty=True)
                 
                 # Add model prompt formatting
-                if is_tribe_title or is_tribe_insights or is_global_section:
+                if is_tribe_title or is_tribe_consensus or is_tribe_characteristics or is_global_section:
                     # Tribe templates fully define the output format; avoid adding topic-only JSON constraints.
                     model_prompt = prompt_xml
                 else:
@@ -1522,6 +1670,10 @@ class BatchReportGenerator:
                 max_tokens = 4000
                 if is_tribe_title:
                     max_tokens = 200
+                elif is_tribe_consensus:
+                    max_tokens = 4000
+                elif is_tribe_characteristics:
+                    max_tokens = 4000
 
                 batch_request = {
                     "system": system_lore,

@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<polisAnalysisPrompt version="1.0">
+    <metadata>
+        <title>Guide to Analyzing What Makes a SINGLE TRIBE Distinctive</title>
+        <purpose>Generate a consistent, evidence-based narrative about what positions define a specific tribe compared to other tribes, and output valid JSON</purpose>
+    </metadata>
+
+    <system>
+        <instruction>You are an expert neutral analyst explaining what makes one tribe distinctive in a Pol.is conversation.</instruction>
+        <instruction>Base every claim on the provided data: the tribe's most characteristic comments (highest distinctiveness/repness) and comparison data against all groups.</instruction>
+        <instruction>Write clear, evidence-based, structured narrative prose.</instruction>
+    </system>
+
+    <criticalInstructions>
+        <instruction>
+            You MUST generate a JSON response that EXACTLY conforms to the schema provided below in the responseFormat section.
+            DO NOT INCLUDE ANY OTHER TEXT or explanations outside the JSON.
+        </instruction>
+        <instruction>
+            DO NOT return ```json at the beginning of the response. This is not markdown. Do not end the response with ```.
+            Your response MUST begin with { and end with }.
+        </instruction>
+        <instruction>
+            Your output MUST be valid JSON. Do not use comments or trailing commas in the JSON.
+        </instruction>
+        <instruction>
+            SUBSET AWARENESS: You are analyzing a SUBSET of the conversation — only the most distinctive/representative comments for this tribe (those with the highest repness or distinctiveness scores). The full conversation contains more comments than shown here. Check the conversation_context field in the data section for exact counts. Do NOT claim patterns like "all comments showed X" or "the entire conversation" — you are only seeing filtered high-signal comments.
+        </instruction>
+        <instruction>
+            TRIBE TERMINOLOGY: Participant groups are called "Tribes". Always write "Tribe 1", "Tribe 2", etc. (1-indexed). Never write "Group 0", "Group 1". The data uses zero-indexed group IDs — add 1 when writing tribe names: group 0 = Tribe 1, group 1 = Tribe 2, and so on.
+        </instruction>
+        <instruction>
+            CRITICAL DATA VERIFICATION: Before writing ANY claim about how this tribe differs from others, you MUST check the actual vote data. Compare tribe_agree_rate against overall_agree_rate for each characteristic comment. The most defining positions are those with the LARGEST GAP between this tribe's rate and the overall rate. NEVER claim a difference exists if the data shows similar rates.
+        </instruction>
+        <instruction>
+            Include citations by referencing specific comment IDs in each clause's citations array (e.g., [123, 456]).
+        </instruction>
+        <instruction>
+            DO NOT include percentages or vote breakdown numbers in the text. Use qualitative descriptors like "far more likely", "distinctly", "uniquely", "notably different", "in contrast to the broader population".
+        </instruction>
+        <instruction>
+            Do NOT copy comments verbatim as the narrative. Summarize and interpret patterns of distinctiveness; use citations to point to supporting comments.
+        </instruction>
+    </criticalInstructions>
+
+    <definitions>
+        <term name="tribe">
+            <description>A single cluster of participants with similar voting patterns within the conversation. Tribes map 1:1 to participant groups (voter clusters).</description>
+        </term>
+        <term name="characteristic_comment">
+            <description>A comment where this tribe's voting pattern most differs from the overall population, indicating a position that defines this tribe. Ranked by repness/distinctiveness score.</description>
+        </term>
+        <term name="repness_score">
+            <description>A measure of how representative or distinctive a comment is for this tribe — higher scores indicate greater divergence from other tribes' voting patterns</description>
+        </term>
+        <term name="tribe_vs_overall_gap">
+            <description>The difference between this tribe's agreement rate on a comment and the overall agreement rate across all participants. Large gaps indicate defining positions.</description>
+        </term>
+    </definitions>
+
+    <analysisProcess>
+        <dataProcessing>
+            <step order="1">
+                <n>Identify Defining Positions</n>
+                <calculations>
+                    <calculation>rank_characteristic_comments_by_repness</calculation>
+                    <calculation>compute_tribe_vs_overall_gap</calculation>
+                    <calculation>cluster_by_theme</calculation>
+                </calculations>
+            </step>
+            <step order="2">
+                <n>Analyze What Sets This Tribe Apart</n>
+                <calculations>
+                    <calculation>identify_positions_unique_to_tribe</calculation>
+                    <calculation>identify_positions_tribe_opposes_vs_majority</calculation>
+                    <calculation>infer_underlying_values</calculation>
+                </calculations>
+            </step>
+            <step order="3">
+                <n>Synthesize Comparative Narrative</n>
+                <patterns>
+                    <pattern>core_identity_from_distinctive_positions</pattern>
+                    <pattern>contrast_with_overall_population</pattern>
+                </patterns>
+            </step>
+        </dataProcessing>
+
+        <reportingStructure>
+            <paragraph type="tribe_defining_characteristics">
+                <elements>
+                    <element>most_distinctive_positions</element>
+                    <element>underlying_values_or_priorities</element>
+                    <element>coherent_identity</element>
+                </elements>
+                <criticalInstructions>
+                    <instruction>
+                        Explain what positions most define this tribe. Focus on the comments with the highest repness scores and the largest gap between this tribe's views and the overall population.
+                    </instruction>
+                    <instruction>
+                        Group related distinctive positions into coherent themes. What values, priorities, or worldview do these positions reveal?
+                    </instruction>
+                    <instruction>
+                        Paint a coherent picture of who this tribe is based on what makes them distinctive, not just what they believe.
+                    </instruction>
+                </criticalInstructions>
+                <length>1-2 paragraphs</length>
+            </paragraph>
+
+            <paragraph type="tribe_vs_others">
+                <elements>
+                    <element>key_contrasts_with_population</element>
+                    <element>where_they_diverge_most</element>
+                    <element>what_the_gap_reveals</element>
+                </elements>
+                <criticalInstructions>
+                    <instruction>
+                        Describe how this tribe's views contrast with the broader population. Where is the gap largest? What does the comparison reveal about this tribe's orientation?
+                    </instruction>
+                    <instruction>
+                        Use the comparison data to ground claims. Highlight where this tribe agrees with something most others disagree with, or vice versa.
+                    </instruction>
+                    <instruction>
+                        Avoid framing the tribe as right or wrong. Present the contrast neutrally, noting what the divergence suggests about different priorities or frameworks.
+                    </instruction>
+                </criticalInstructions>
+                <length>1 paragraph</length>
+            </paragraph>
+        </reportingStructure>
+
+        <citationRules>
+            <template>
+                commentId
+            </template>
+            <rules>
+                <rule>minimum_citations_per_clause>1</rule>
+                <rule>maximum_citations_per_clause>10</rule>
+                <rule>include_full_vote_breakdown>false</rule>
+            </rules>
+        </citationRules>
+
+        <validationRequirements>
+            <dataQuality>
+                <requirement>minimum_votes_per_cited_statement>5</requirement>
+            </dataQuality>
+            <reportingCompleteness>
+                <requirement>defining_characteristics_identified>true</requirement>
+                <requirement>comparison_with_population_addressed>true</requirement>
+                <requirement>citations_present_in_each_clause>true</requirement>
+            </reportingCompleteness>
+        </validationRequirements>
+
+        <languageGuidelines>
+            <styleRules>
+                <rule>maintain_neutral_tone</rule>
+                <rule>avoid_mind_reading</rule>
+                <rule>focus_on_gaps_and_contrasts</rule>
+                <rule>avoid_repetitive_structures</rule>
+                <rule>use_qualitative_descriptors_not_numbers</rule>
+                <rule>do_not_frame_tribe_as_right_or_wrong</rule>
+            </styleRules>
+        </languageGuidelines>
+
+        <qualityChecklist>
+            <check>claims_supported_by_citations</check>
+            <check>defining_positions_grounded_in_repness_data</check>
+            <check>comparison_grounded_in_tribe_vs_overall_gap</check>
+            <check>no_percentages_in_narrative_text</check>
+            <check>json_schema_followed_exactly</check>
+        </qualityChecklist>
+    </analysisProcess>
+
+    <validationRules>
+        <rule>Each clause must include at least one citation to a specific comment ID</rule>
+        <rule>All claims about tribe distinctiveness must be grounded in the provided characteristic_comments and comparison data</rule>
+        <rule>Output must be valid JSON and match the schema</rule>
+    </validationRules>
+
+    <responseFormat>
+        <condensedJSONSchema>
+            {
+            "id": "tribe_characteristics",
+            "title": "Tribe Characteristics",
+            "paragraphs": [
+            {
+            "id": "string",
+            "title": "string",
+            "sentences": [
+            {
+            "clauses": [
+            {
+            "text": "string",
+            "citations": [
+            123
+            ]
+            }
+            ]
+            }
+            ]
+            }
+            ]
+            }
+        </condensedJSONSchema>
+
+        <typescriptTypesReference>
+            type Citation = {
+            commentId: number;
+            };
+
+            type Clause = {
+            text: string;
+            citations: Citation[];
+            };
+
+            type Sentence = {
+            clauses: Clause[];
+            };
+
+            type Paragraph = {
+            id: string;
+            title: string;
+            sentences: Sentence[];
+            };
+
+            type Subtask = {
+            id: string;
+            title: string;
+            paragraphs: Paragraph[];
+            };
+        </typescriptTypesReference>
+    </responseFormat>
+
+    <example>
+        {
+        "id": "tribe_characteristics",
+        "title": "Tribe Characteristics",
+        "paragraphs": [
+        {
+        "id": "tribe_defining_characteristics",
+        "title": "What Defines This Tribe",
+        "sentences": [
+        {
+        "clauses": [
+        {
+        "text": "This tribe is most distinctively defined by their strong support for market-based solutions and skepticism toward regulatory intervention.",
+        "citations": [101, 145, 178]
+        },
+        {
+        "text": "Their most characteristic positions cluster around economic efficiency and individual choice, suggesting a worldview that prioritizes autonomy and competition.",
+        "citations": [132, 156, 204]
+        }
+        ]
+        }
+        ]
+        },
+        {
+        "id": "tribe_vs_others",
+        "title": "How This Tribe Differs From the Broader Population",
+        "sentences": [
+        {
+        "clauses": [
+        {
+        "text": "Compared to the overall population, this tribe is far more supportive of deregulation proposals and notably less sympathetic to calls for expanded public services.",
+        "citations": [145, 178, 221]
+        },
+        {
+        "text": "This divergence suggests fundamentally different assumptions about the role of institutions, with this tribe favoring decentralized and voluntary approaches where others prefer collective action.",
+        "citations": [204, 245]
+        }
+        ]
+        }
+        ]
+        }
+        ]
+        }
+    </example>
+
+    <data>
+        INSERT_DATA_HERE
+    </data>
+</polisAnalysisPrompt>

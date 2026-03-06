@@ -155,9 +155,9 @@ class GroupDataProcessor:
                 pid = vote.get('pid')
                 vote_val = vote.get('vote')
                 if pid is not None and vote_val is not None:
-                    if vote_val == 1:
+                    if vote_val == -1:  # -1 = agree in Polis convention
                         voting_patterns[pid]['agree'] += 1
-                    elif vote_val == -1:
+                    elif vote_val == 1:  # 1 = disagree in Polis convention
                         voting_patterns[pid]['disagree'] += 1
                     elif vote_val == 0:
                         voting_patterns[pid]['pass'] += 1
@@ -370,10 +370,10 @@ class GroupDataProcessor:
                     vote_data[tid]['total_votes'] += 1
                     
                     # Update vote counts
-                    if vote_val == 1:
+                    if vote_val == -1:  # -1 = agree in Polis convention
                         vote_data[tid]['total_agrees'] += 1
                         vote_data[tid]['groups'][group_id]['agrees'] += 1
-                    elif vote_val == -1:
+                    elif vote_val == 1:  # 1 = disagree in Polis convention
                         vote_data[tid]['total_disagrees'] += 1
                         vote_data[tid]['groups'][group_id]['disagrees'] += 1
                     elif vote_val == 0:

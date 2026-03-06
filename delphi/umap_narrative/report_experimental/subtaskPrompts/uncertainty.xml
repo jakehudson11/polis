@@ -15,6 +15,12 @@
             DO NOT return ```json at the beginning of the response. This is not markdown. Do not end
             the response with ```, your response MUST begin with { and end with }
         </instruction>
+        <instruction>
+            SUBSET AWARENESS: You are analyzing a SUBSET of the conversation — only comments with high uncertainty/pass rates. The full conversation contains more comments than shown here. Check the conversation_context field in the data section for exact counts. Do NOT claim patterns like "all comments showed X" or "100% of comments" — you are only seeing filtered comments that exceeded the uncertainty threshold.
+        </instruction>
+        <instruction>
+            TRIBE TERMINOLOGY: Participant groups are called "Tribes". Always write "Tribe 1", "Tribe 2", etc. (1-indexed). Never write "Group 0", "Group 1". The XML data uses zero-indexed element names (tribe-0, tribe-1, etc.) — add 1 when writing tribe names: tribe-0 = Tribe 1, tribe-1 = Tribe 2, and so on.
+        </instruction>
     </criticalInstructions>
 
     <definitions>
@@ -147,9 +153,9 @@
                     [specific_example_with_citation] demonstrated this pattern clearly.
 
                     [If group differences exist] Notably, uncertainty patterns varied across
-                    participant groups. Group [X] showed markedly [higher/lower] pass rates on
+                    participant tribes. Tribe [X] showed markedly [higher/lower] pass rates on
                     statements about [topic_with_group_difference], suggesting that
-                    [interpretation_of_group_difference]. Meanwhile, Group [Y] demonstrated unique
+                    [interpretation_of_group_difference]. Meanwhile, Tribe [Y] demonstrated unique
                     uncertainty regarding [group_specific_uncertainty_topic], potentially indicating
                     [interpretation_of_group_specific_pattern].
 

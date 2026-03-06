@@ -20,9 +20,22 @@
             CRITICAL DATA VERIFICATION: Before writing ANY claim about a statement, you MUST check the actual vote data in the XML.
             - Check the agrees, disagrees, and votes attributes for EACH group
             - If a comment has high agrees and zero/low disagrees in ALL groups, it IS a consensus item — do NOT claim it "failed to generate support"
-            - If a comment has high disagrees, then it is NOT a consensus item
             - NEVER claim "universal disagreement" for statements where the data shows agreement
             - Your narrative MUST be consistent with the actual numbers. Every claim about support or opposition must match the vote data.
+        </instruction>
+        <instruction>
+            SUBSET AWARENESS: You are analyzing a SUBSET of the conversation — only comments that met the high cross-tribe consensus filter. The full conversation contains more comments than shown here. Check the conversation_context field in the data section for exact counts. Do NOT claim patterns like "all comments showed X" or "every statement in the conversation" — you are only seeing filtered comments that passed the consensus threshold.
+        </instruction>
+        <instruction>
+            TRIBE TERMINOLOGY: Participant groups are called "Tribes". Always write "Tribe 1", "Tribe 2", etc. (1-indexed). Never write "Group 0", "Group 1". The XML data uses zero-indexed element names (tribe-0, tribe-1, etc.) — add 1 when writing tribe names: tribe-0 = Tribe 1, tribe-1 = Tribe 2, and so on.
+        </instruction>
+        <instruction>
+            CRITICAL — DISAGREE CONSENSUS: "Consensus" means all groups voted THE SAME WAY, whether that is agree OR disagree.
+            - If a comment has HIGH DISAGREES and ZERO/LOW AGREES across ALL groups, that IS consensus — it is consensus to REJECT that statement.
+            - NEVER describe unanimous cross-group disagreement as "absence of consensus", "failure to find common ground", or "lack of agreement".
+            - When all groups reject a statement together, report it as "disagree consensus" or "consensus to reject" — this is shared ground, not division.
+            - Distinguish between "agree consensus" (all groups support a statement) and "disagree consensus" (all groups reject a statement). Both are valid forms of cross-tribe consensus.
+            - Example: If comment has agrees=0, disagrees=5, and every group shows 0 agrees and all disagrees, that is STRONG consensus (shared rejection). Report it as such.
         </instruction>
     </criticalInstructions>
 
@@ -38,6 +51,11 @@
             <description>Comments with exceptionally high agreement across all tribes</description>
             <threshold>0.8 consensus score</threshold>
             <unit>consensus_score</unit>
+        </term>
+        <term name="disagree_consensus">
+            <description>Comments where all groups unanimously DISAGREE — high disagrees and zero/low agrees across every group. This is a valid form of consensus (shared rejection) and must NOT be described as absence of consensus. The group-aware-consensus metric scores this highly because all groups voted the same direction.</description>
+            <threshold>Same thresholds as group_informed_consensus</threshold>
+            <unit>consensus_score (0-1)</unit>
         </term>
     </definitions>
 
@@ -221,6 +239,15 @@
                     <action>analyze_wording_carefully</action>
                 </handling>
             </case>
+            <case type="disagree_consensus">
+                <description>Comments where agrees=0 (or near-zero) and disagrees are high across ALL groups. All groups unanimously reject the statement.</description>
+                <handling>
+                    <action>report_as_consensus_to_reject — this IS cross-tribe consensus, not its absence</action>
+                    <action>describe_as_shared_rejection — all groups found common ground in rejecting this statement</action>
+                    <action>analyze_what_the_rejection_reveals — shared rejection of an idea can illuminate shared values just as much as shared support</action>
+                    <action>NEVER describe as "absence of consensus" or "failure to agree" or "no common ground"</action>
+                </handling>
+            </case>
         </specialCases>
 
         <languageGuidelines>
@@ -234,6 +261,10 @@
                 <term>collective endorsement</term>
                 <term>broad backing</term>
                 <term>unified position</term>
+                <term>shared rejection</term>
+                <term>consensus to reject</term>
+                <term>unanimous dismissal</term>
+                <term>collective opposition</term>
             </consensusTerms>
 
             <styleRules>
@@ -261,6 +292,7 @@
         <rule>Citations must use provided format</rule>
         <rule>Multiple consensus areas must be identified and analyzed</rule>
         <rule>Before stating any comment failed to achieve consensus, verify its agrees vs disagrees in the data. A comment with majority agrees in all groups IS achieving consensus.</rule>
+        <rule>A comment with zero agrees but high disagrees in ALL groups IS achieving consensus (disagree consensus). Never report it as lack of consensus.</rule>
         <rule>If the data contains only a few comments, report what the data actually shows rather than generating generic patterns. Do not project expected patterns onto the data.</rule>
     </validationRules>
 

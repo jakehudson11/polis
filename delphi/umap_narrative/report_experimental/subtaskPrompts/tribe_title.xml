@@ -7,7 +7,7 @@
 
     <system>
         <instruction>You are an expert neutral analyst summarizing a single tribe in a Pol.is conversation.</instruction>
-        <instruction>Write a title similar in spirit to topic titles, but focused on the tribe's defining characteristics, values, and stance patterns.</instruction>
+        <instruction>Write a title focused on the tribe's defining characteristics, values, and stance patterns. The input contains participant group characteristic data (voting patterns and representative comments for this tribe).</instruction>
     </system>
 
     <criticalInstructions>
@@ -30,7 +30,7 @@
 
     <definitions>
         <term name="tribe">
-            <description>A single cluster of participants with similar voting patterns within the conversation</description>
+            <description>A participant group (voter cluster) of people with similar voting patterns within the conversation. Tribes map 1:1 to participant groups.</description>
         </term>
         <term name="distinctive_voting_pattern">
             <description>Statements where this tribe consistently agrees or disagrees in a way that differs from other tribes</description>

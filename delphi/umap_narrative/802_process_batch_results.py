@@ -354,6 +354,14 @@ class BatchResultProcessor:
                 # Back-compat: infer kind from section_name conventions
                 if isinstance(section_name, str) and '_global_' in section_name:
                     section_kind = 'global'
+                elif isinstance(section_name, str) and section_name.endswith('_title') and 'tribe' in section_name:
+                    section_kind = 'tribe_title'
+                elif isinstance(section_name, str) and section_name.endswith('_consensus') and 'tribe' in section_name:
+                    section_kind = 'tribe_consensus'
+                elif isinstance(section_name, str) and section_name.endswith('_characteristics') and 'tribe' in section_name:
+                    section_kind = 'tribe_characteristics'
+                elif isinstance(section_name, str) and section_name.endswith('_insights') and 'tribe' in section_name:
+                    section_kind = 'tribe_insights'
                 else:
                     section_kind = 'topic'
             
@@ -497,6 +505,14 @@ class BatchResultProcessor:
                         if not section_kind:
                             if isinstance(section_name, str) and '_global_' in section_name:
                                 section_kind = 'global'
+                            elif isinstance(section_name, str) and section_name.endswith('_title') and 'tribe' in section_name:
+                                section_kind = 'tribe_title'
+                            elif isinstance(section_name, str) and section_name.endswith('_consensus') and 'tribe' in section_name:
+                                section_kind = 'tribe_consensus'
+                            elif isinstance(section_name, str) and section_name.endswith('_characteristics') and 'tribe' in section_name:
+                                section_kind = 'tribe_characteristics'
+                            elif isinstance(section_name, str) and section_name.endswith('_insights') and 'tribe' in section_name:
+                                section_kind = 'tribe_insights'
                             else:
                                 section_kind = 'topic'
 
