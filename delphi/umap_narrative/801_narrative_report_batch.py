@@ -1104,11 +1104,31 @@ class BatchReportGenerator:
                         "overall_votes": int(overall_votes),
                     })
 
-                results.sort(key=lambda x: x['distinctiveness_score'], reverse=True)
-                agree_count = sum(1 for r in results if r.get('repful_for') == 'agree')
-                disagree_count = len(results) - agree_count
-                logger.info(f"Tribe {group_id} characteristics: {len(results)} comments from Clojure repness (>= 1.0) — {agree_count} agree, {disagree_count} disagree")
-                return results[:limit]
+                # Split into agree and disagree, each sorted by score
+                agrees = sorted([r for r in results if r.get('repful_for') == 'agree'],
+                                key=lambda x: x['distinctiveness_score'], reverse=True)
+                disagrees = sorted([r for r in results if r.get('repful_for') == 'disagree'],
+                                   key=lambda x: x['distinctiveness_score'], reverse=True)
+
+                # Balanced selection: aim for ~60% agree, ~40% disagree
+                target_disagree = max(1, int(limit * 0.4)) if disagrees else 0
+                target_agree = limit - target_disagree
+
+                # Adjust if one pool is too small
+                if len(disagrees) < target_disagree:
+                    target_disagree = len(disagrees)
+                    target_agree = min(len(agrees), limit - target_disagree)
+                if len(agrees) < target_agree:
+                    target_agree = len(agrees)
+                    target_disagree = min(len(disagrees), limit - target_agree)
+
+                balanced = agrees[:target_agree] + disagrees[:target_disagree]
+                balanced.sort(key=lambda x: x['distinctiveness_score'], reverse=True)
+
+                agree_count = sum(1 for r in balanced if r.get('repful_for') == 'agree')
+                disagree_count = len(balanced) - agree_count
+                logger.info(f"Tribe {group_id} characteristics: {len(balanced)}/{len(results)} comments from Clojure repness (>= 1.0) — {agree_count} agree, {disagree_count} disagree (balanced)")
+                return balanced[:limit]
 
         # --- Fallback: simple distinctiveness heuristic ---
         logger.info(f"Tribe {group_id} characteristics: falling back to agree-rate distinctiveness (no Clojure repness)")

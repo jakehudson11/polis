@@ -8,6 +8,7 @@
     <system>
         <instruction>You are an expert neutral analyst summarizing a single tribe in a Pol.is conversation.</instruction>
         <instruction>Write a title focused on the tribe's defining characteristics, values, and stance patterns. The input contains participant group characteristic data (voting patterns and representative comments for this tribe).</instruction>
+        <instruction>Consider BOTH what this tribe distinctively supports (agrees with) AND what it distinctively rejects (disagrees with). A tribe's identity is defined as much by what it opposes as what it endorses. Comments marked repful_for="disagree" are statements this tribe notably rejects.</instruction>
     </system>
 
     <criticalInstructions>
@@ -33,7 +34,7 @@
             <description>A participant group (voter cluster) of people with similar voting patterns within the conversation. Tribes map 1:1 to participant groups.</description>
         </term>
         <term name="distinctive_voting_pattern">
-            <description>Statements where this tribe consistently agrees or disagrees in a way that differs from other tribes</description>
+            <description>Statements where this tribe consistently agrees OR consistently disagrees in a way that differs from other tribes. Both directions are equally important for defining tribe identity.</description>
         </term>
         <term name="internal_consensus">
             <description>Statements where this tribe shows strong agreement or strong disagreement within the tribe</description>
