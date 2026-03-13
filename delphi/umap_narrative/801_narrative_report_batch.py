@@ -583,7 +583,9 @@ class BatchReportGenerator:
                         "name": topic_item.get('topic_name', f"Topic {cluster_id}"),
                         "topic_key": topic_key,
                         "citations": topic_comments.get(cluster_id, []),
-                        "sample_comments": sample_comments
+                        "sample_comments": sample_comments,
+                        "distinction_revised": bool(topic_item.get('distinction_revised', False)),
+                        "original_topic_name": topic_item.get('original_topic_name'),
                     }
                     all_topics.append(topic)
 
@@ -1620,6 +1622,30 @@ class BatchReportGenerator:
                     if isinstance(template_dict['polisAnalysisPrompt']['context'], dict):
                         template_dict['polisAnalysisPrompt']['context']['topic_name'] = topic_name
                 
+                # Add distinction hint for topics that were revised for uniqueness
+                if topic.get('distinction_revised') and not (is_global_section or is_tribe_title or is_tribe_consensus or is_tribe_characteristics):
+                    sibling_names = [
+                        t['name'] for t in topics
+                        if t.get('section_type') == 'topic'
+                        and t.get('layer_id') == topic.get('layer_id')
+                        and t.get('topic_key') != topic_key
+                    ]
+                    original_name = topic.get('original_topic_name', '')
+                    prefix_match = re.match(r'^\d+_\d+:\s*', original_name)
+                    clean_original = original_name[prefix_match.end():] if prefix_match else original_name
+                    
+                    distinction_hint = (
+                        f"IMPORTANT DISTINCTION: This topic was originally named '{clean_original}' "
+                        f"but was renamed to '{topic_name}' to ensure it is clearly distinct from "
+                        f"sibling topics at the same level: {', '.join(sibling_names)}. "
+                        f"Focus your analysis on what makes THIS topic's perspective unique and "
+                        f"different from those sibling topics. Avoid overlapping with their content."
+                    )
+                    
+                    if isinstance(template_dict['polisAnalysisPrompt'].get('context'), dict):
+                        template_dict['polisAnalysisPrompt']['context']['distinction_hint'] = distinction_hint
+                    logger.info(f"Added distinction hint for revised topic '{topic_name}' (originally '{clean_original}')")
+
                 # Convert back to XML
                 prompt_xml = xmltodict.unparse(template_dict, pretty=True)
                 

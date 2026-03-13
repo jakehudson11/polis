@@ -257,6 +257,24 @@ def main():
         print("Aborting: downstream steps may rely on successful pipeline outputs.")
         sys.exit(pipeline_exit_code)
 
+    # --- Enforce topic distinction within each layer ---
+    print(f"{GREEN}Enforcing topic distinction within layers...{NC}")
+    distinction_command = [
+        "python", f"{app_path}/umap_narrative/752_enforce_topic_distinction.py",
+        f"--conversation_id={zid}",
+    ]
+    if verbose_arg:
+        distinction_command.append(verbose_arg)
+
+    distinction_process = subprocess.run(distinction_command)
+    distinction_exit_code = distinction_process.returncode
+
+    if distinction_exit_code != 0:
+        print(f"{YELLOW}Warning: Topic distinction enforcement failed with exit code {distinction_exit_code}{NC}")
+        print("Continuing with pipeline...")
+    else:
+        print(f"{GREEN}Topic distinction enforcement complete.{NC}")
+
     # Success (math pipeline already exited non-zero earlier if it failed)
     sys.exit(0)
 

@@ -910,7 +910,79 @@ class JobProcessor:
             logger.warning(warn_msg, exc_info=True)
             self.update_job_logs(job, {'level': 'WARNING', 'message': warn_msg})
             return False
-            
+
+    def _run_topic_distinction(
+        self,
+        job: Dict[str, Any],
+        conversation_id: Any,
+        app_path: str,
+    ) -> bool:
+        """Run 752_enforce_topic_distinction as a best-effort step before narrative generation.
+
+        Ensures topic names within each layer are clearly distinct.
+        Never raises; returns True on success, False otherwise.
+        """
+        try:
+            topic_names_ok = self._dynamo_has_any_items('Delphi_CommentClustersLLMTopicNames', conversation_id)
+            if not topic_names_ok:
+                msg = (
+                    "Skipping topic distinction (752_enforce_topic_distinction): "
+                    "no topic names found in Delphi_CommentClustersLLMTopicNames."
+                )
+                logger.info(msg)
+                self.update_job_logs(job, {'level': 'INFO', 'message': msg})
+                return False
+
+            cmd = [
+                sys.executable,
+                f'{app_path}/umap_narrative/752_enforce_topic_distinction.py',
+                '--conversation_id', str(conversation_id),
+            ]
+
+            self.update_job_logs(job, {'level': 'INFO', 'message': f"Executing topic distinction: {' '.join(cmd)}"})
+
+            env = os.environ.copy()
+            existing_pp = env.get('PYTHONPATH', '')
+            env['PYTHONPATH'] = f"{app_path}{os.pathsep}{existing_pp}" if existing_pp else str(app_path)
+
+            timeout_seconds = int(job.get('timeout_seconds', 3600) or 3600)
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                env=env,
+            )
+
+            start_time = time.time()
+            for line in iter(process.stdout.readline, ''):
+                self.update_job_logs(job, {'level': 'INFO', 'message': f"[topic_distinction] {line.strip()}"})
+                if time.time() - start_time > timeout_seconds:
+                    raise subprocess.TimeoutExpired(cmd, timeout_seconds)
+
+            process.stdout.close()
+            return_code = process.wait()
+            if return_code == 0:
+                self.update_job_logs(job, {'level': 'INFO', 'message': 'Topic distinction completed successfully.'})
+                return True
+
+            warn_msg = f"Topic distinction failed with exit code {return_code}; continuing to narrative enqueue."
+            logger.warning(warn_msg)
+            self.update_job_logs(job, {'level': 'WARNING', 'message': warn_msg})
+            return False
+        except subprocess.TimeoutExpired:
+            warn_msg = 'Topic distinction timed out; continuing to narrative enqueue.'
+            logger.warning(warn_msg)
+            self.update_job_logs(job, {'level': 'WARNING', 'message': warn_msg})
+            return False
+        except Exception as e:
+            warn_msg = f"Topic distinction encountered an error ({e}); continuing to narrative enqueue."
+            logger.warning(warn_msg, exc_info=True)
+            self.update_job_logs(job, {'level': 'WARNING', 'message': warn_msg})
+            return False
+
     def update_job_logs(self, job, log_entry, mirror_to_console=True):
         """
         Add a log entry to the job logs with optimistic locking.
@@ -1213,6 +1285,13 @@ class JobProcessor:
                             conversation_id=conversation_id,
                             job_id=job_id,
                             report_id=report_id_for_hierarchy,
+                            app_path=app_path,
+                        )
+
+                        # Best-effort: enforce topic name distinction within each layer.
+                        self._run_topic_distinction(
+                            job=job,
+                            conversation_id=conversation_id,
                             app_path=app_path,
                         )
 

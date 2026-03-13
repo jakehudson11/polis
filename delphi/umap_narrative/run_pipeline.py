@@ -1325,6 +1325,31 @@ def process_layers_and_create_visualizations(
                 f"({total_llm_attempted} LLM attempts)."
             )
 
+        # --- Topic Distinction Enforcement ---
+        # After all layers have topic names, check for similar topics within each layer
+        # and revise them for distinctness before they're used in narrative prompts.
+        if dynamo_storage and total_llm_succeeded > 0:
+            try:
+                import importlib.util
+                _distinction_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "752_enforce_topic_distinction.py")
+                _spec = importlib.util.spec_from_file_location("enforce_topic_distinction_752", _distinction_path)
+                _mod = importlib.util.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+
+                anthropic_model = os.environ.get("ANTHROPIC_MODEL")
+                logger.info("Running topic distinction enforcement for conversation %s...", conversation_id)
+                distinction_result = _mod.enforce_topic_distinction(
+                    conversation_id=conversation_id,
+                    anthropic_model=anthropic_model,
+                )
+                logger.info(
+                    "Topic distinction: layers_checked=%d, revised=%d topics",
+                    distinction_result.get("layers_checked", 0),
+                    distinction_result.get("topics_revised", 0),
+                )
+            except Exception as e:
+                logger.warning("Topic distinction enforcement failed (non-blocking): %s", e, exc_info=True)
+
     return index_file
 
 
