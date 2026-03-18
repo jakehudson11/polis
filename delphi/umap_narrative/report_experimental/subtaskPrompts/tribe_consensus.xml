@@ -41,6 +41,13 @@
         <instruction>
             Do NOT copy comments verbatim as the narrative. Summarize and interpret thematic patterns; use citations to point to supporting comments.
         </instruction>
+        <instruction>
+            SMALL POPULATION HANDLING: Check the participant_count for this tribe in the data payload.
+            - When participant_count is 1: this "tribe" is literally one person. Describe their agreement/disagreement as individual opinions, not internal consensus. Use language like "this individual" or "this participant" rather than "this tribe" or "this group". Do not use terms like "near-unanimous" or "widespread" — these are meaningless for one person.
+            - When participant_count is 2 or 3: describe the tribe as "a small group" or "these few participants" rather than using broad collective language. Avoid phrases like "strong consensus within the tribe" — with so few participants, agreement may be coincidental rather than indicative of shared values.
+            - When participant_count ≤ 3 generally: focus on what the participant(s) actually voted on rather than inferring thematic patterns of consensus. With very small numbers, vote patterns reflect individual choices, not group dynamics.
+            - When all tribes have identical or near-identical consensus patterns, note that the conversation may have lacked sufficient participation to identify meaningful group differences.
+        </instruction>
     </criticalInstructions>
 
     <definitions>

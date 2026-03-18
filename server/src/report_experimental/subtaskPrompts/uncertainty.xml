@@ -181,6 +181,14 @@
                     <requirement>similar_uncertainty_patterns&gt;true</requirement>
                 </requirements>
             </case>
+            <case type="small_population_uncertainty">
+                <description>When total-participants is less than 10 or vote counts per statement are very low</description>
+                <handling>
+                    <instruction>With very few votes, high pass rates may simply reflect individual hesitation rather than genuine collective uncertainty</instruction>
+                    <instruction>Do not describe pass rates from 1-3 voters as "significant uncertainty"</instruction>
+                    <instruction>Focus on what the pass votes might indicate at an individual level rather than as population-level uncertainty patterns</instruction>
+                </handling>
+            </case>
         </specialCases>
 
         <languageGuidelines>

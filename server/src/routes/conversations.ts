@@ -1358,6 +1358,29 @@ function handle_GET_iim_conversation(
     });
 }
 
+function handle_GET_internal_conversationZid(
+  req: ExpressRequest,
+  res: ExpressResponse
+) {
+  const internalKey = req.headers["x-polis-internal-key"];
+  if (
+    !internalKey ||
+    internalKey !== process.env.POLIS_INTERNAL_PROXY_SECRET
+  ) {
+    failJson(res, 403, "polis_err_internal_auth");
+    return;
+  }
+
+  const conversation_id = req.p.conversation_id;
+  getZidFromConversationId(conversation_id)
+    .then((zid: number) => {
+      res.json({ zid, conversation_id });
+    })
+    .catch((err: any) => {
+      failJson(res, 404, "polis_err_zid_not_found", err);
+    });
+}
+
 export {
   handle_GET_conversationPreloadInfo,
   handle_GET_all_conversations,
@@ -1367,6 +1390,7 @@ export {
   handle_GET_conversationStats,
   handle_GET_iim_conversation,
   handle_GET_iip_conversation,
+  handle_GET_internal_conversationZid,
   handle_POST_conversation_close,
   handle_POST_conversation_reopen,
   handle_POST_conversations,

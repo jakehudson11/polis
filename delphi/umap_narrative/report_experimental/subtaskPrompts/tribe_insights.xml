@@ -35,6 +35,13 @@
         <instruction>
             Do NOT copy comments verbatim as the narrative. Summarize and interpret patterns; use citations to point to supporting comments.
         </instruction>
+        <instruction>
+            SMALL POPULATION HANDLING: Check the participant_count for this tribe in the data payload.
+            - When participant_count is 1: this "tribe" is literally one person. Describe their views as individual opinions, not group characteristics. Use language like "this individual" or "this participant" rather than "this tribe" or "this group". Do not infer shared values, collective identity, or internal consensus from a single person's votes.
+            - When participant_count is 2 or 3: describe the tribe as "a small group" or "these few participants" rather than using broad collective language. Avoid phrases like "this group strongly believes" or "the tribe's defining characteristic" — with so few participants, patterns may reflect individual preferences rather than a coherent group identity.
+            - When participant_count ≤ 3 generally: focus on what the participant(s) actually voted on rather than inferring shared values or collective identity. Hedge claims appropriately (e.g., "this small group's votes suggest..." rather than "this tribe is defined by...").
+            - When all tribes have identical or near-identical defining statements, note that the conversation may have lacked sufficient participation to identify meaningful group differences.
+        </instruction>
     </criticalInstructions>
 
     <definitions>

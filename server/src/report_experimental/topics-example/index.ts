@@ -58,8 +58,9 @@ export async function getTopicsFromRID(zId: number) {
     if (!config.geminiApiKey) {
       throw new Error("polis_err_gemini_api_key_not_set");
     }
-    const resp = await sendCommentGroupsSummary(zId, undefined, false);
-    const modified = (resp as string).split("\n");
+    const result = await sendCommentGroupsSummary(zId, undefined, false);
+    const csvStr = typeof result === 'string' ? result : result.csv;
+    const modified = csvStr.split("\n");
     modified[0] = `comment-id,comment_text,total-votes,total-agrees,total-disagrees,total-passes,group-a-votes,group-0-agree-count,group-0-disagree-count,group-0-pass-count,group-b-votes,group-1-agree-count,group-1-disagree-count,group-1-pass-count`;
 
     const comments = await parseCsvString(modified.join("\n"));

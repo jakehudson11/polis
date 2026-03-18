@@ -3,7 +3,7 @@ import Config from "../config";
 import logger from "../utils/logger";
 
 /**
- * Generates 25-40 seed comments for a Polis conversation using OpenAI.
+ * Generates 20-25 seed comments for a Polis conversation using OpenAI.
  * Implements a 50:50 balance between universal-value and polarizing comments.
  */
 export async function generateSeedComments(
@@ -57,13 +57,13 @@ export async function generateSeedComments(
     });
 
     // Validate we got a reasonable number of comments
-    if (comments.length < 25) {
-      logger.warn("Generated fewer than 25 seed comments", {
+    if (comments.length < 20) {
+      logger.warn("Generated fewer than 20 seed comments", {
         count: comments.length,
       });
     }
 
-    return comments.slice(0, 40); // Cap at 40 comments
+    return comments.slice(0, 25); // Cap at 25 comments
   } catch (error: any) {
     logger.error("Failed to generate seed comments", {
       error: error.message,
@@ -76,7 +76,7 @@ export async function generateSeedComments(
 }
 
 function buildSystemPrompt(): string {
-  return `You are an AI agent that generates 25–40 high-quality seed comments for Pol.is conversations. Your input is a problem/objective statement and contextual information. Your output is a diverse, well-structured set of simple, clear, single-point comments written in plain language and suitable for the Pol.is 140-character limit.
+  return `You are an AI agent that generates 20–25 high-quality seed comments for Pol.is conversations. Your input is a problem/objective statement and contextual information. Your output is a diverse, well-structured set of simple, clear, single-point comments written in plain language and suitable for the Pol.is 140-character limit.
 
 In addition to broad, shared concerns, the agent must intentionally surface opinionated, tension-filled, and divisive viewpoints that are likely to split participants into meaningful clusters.
 
@@ -102,7 +102,7 @@ You are generating seed comments for a Pol.is conversation.
 
 # Instructions
 1. Read and interpret the deliberation context carefully, including the problem statement and all relevant background.
-2. Generate 25–40 seed comments.
+2. Generate 20–25 seed comments.
 3. Enforce a strict distribution:
    - Approximately 50% of comments should reflect broadly shared or near-universal value positions.
    - Approximately 50% of comments should reflect polarizing, contested, or divisive viewpoints.
@@ -159,6 +159,6 @@ You are generating seed comments for a Pol.is conversation.
 ${context || "No additional context provided."}
 
 # Output Format
-Generate 25-40 seed comments, one per line, with NO numbering, NO bullets, NO labels. Just the plain text comments.`;
+Generate 20-25 seed comments, one per line, with NO numbering, NO bullets, NO labels. Just the plain text comments.`;
 }
 

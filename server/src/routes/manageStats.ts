@@ -289,8 +289,11 @@ export async function handle_GET_participationStats(
        LEFT JOIN users u
          ON u.uid = p.uid
        LEFT JOIN owner_row o ON true
-       LEFT JOIN xids x
-         ON x.uid = p.uid AND x.owner = o.owner
+       LEFT JOIN (
+         SELECT DISTINCT ON (uid, owner) uid, owner, xid
+         FROM xids
+         ORDER BY uid, owner, created
+       ) x ON x.uid = p.uid AND x.owner = o.owner
        WHERE (
          ($2)::text IS NULL
          OR ps.pid::text ILIKE ($2)

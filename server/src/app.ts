@@ -113,6 +113,7 @@ import {
   handle_GET_conversationStats,
   handle_GET_iim_conversation,
   handle_GET_iip_conversation,
+  handle_GET_internal_conversationZid,
   handle_POST_conversation_close,
   handle_POST_conversation_reopen,
   handle_POST_conversations,
@@ -847,6 +848,13 @@ helpersInitialized.then(
         assignToPCustom("zid")
       ),
       handle_GET_conversationUuid
+    );
+
+    app.get(
+      "/api/v3/internal/conversationZid",
+      moveToBody,
+      need("conversation_id", getStringLimitLength(1, 1000), assignToP),
+      handle_GET_internal_conversationZid
     );
 
     app.get(

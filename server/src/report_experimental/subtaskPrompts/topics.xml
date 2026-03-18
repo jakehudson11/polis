@@ -233,6 +233,15 @@
                     <action>check_related_statements</action>
                 </handling>
             </case>
+            <case type="small_population">
+                <description>When total-participants is less than 10 or any group has fewer than 3 members</description>
+                <handling>
+                    <instruction>Qualify all claims as reflecting individual views, not statistical patterns</instruction>
+                    <instruction>Note the limited sample size explicitly in the topic overview</instruction>
+                    <instruction>Avoid strong pattern language like "consistently", "clearly", "remarkably"</instruction>
+                    <instruction>Focus on describing what participants actually said rather than inferring broader topical trends</instruction>
+                </handling>
+            </case>
         </specialCases>
 
         <languageGuidelines>

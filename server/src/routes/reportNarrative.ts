@@ -130,15 +130,36 @@ const getCommentsAsXML = async (
     disagrees: number;
     passes: number;
     group_aware_consensus?: number;
+    group_aware_consensus_disagree?: number;
     comment_extremity?: number;
     comment_id: number;
+    num_groups?: number;
   }) => boolean
 ) => {
   try {
-    const resp = await sendCommentGroupsSummary(id, undefined, false, filter);
-    const xml = PolisConverter.convertToXml(resp as string);
-    if (xml.trim().length === 0)
+    const result = await sendCommentGroupsSummary(id, undefined, false, filter);
+    const csvData = typeof result === 'string' ? result : result.csv;
+    const metadata = typeof result === 'string' ? null : result.metadata;
+    let xml = PolisConverter.convertToXml(csvData);
+    if (xml.trim().length === 0) {
       logger.error("No data has been returned by sendCommentGroupsSummary");
+      return xml;
+    }
+
+    if (metadata) {
+      const metadataXml = [
+        '<conversation-metadata',
+        `  total-participants="${metadata.totalParticipants}"`,
+        `  num-groups="${metadata.numGroups}">`,
+      ];
+      for (const [gid, count] of Object.entries(metadata.groupSizes)) {
+        const groupLetter = String.fromCharCode(97 + Number(gid));
+        metadataXml.push(`  <group id="${groupLetter}" participants="${count}" />`);
+      }
+      metadataXml.push('</conversation-metadata>');
+      xml = metadataXml.join('\n') + '\n' + xml;
+    }
+
     return xml;
   } catch (e) {
     logger.error("Error in getCommentsAsXML:", e);
@@ -373,9 +394,6 @@ export async function handle_GET_groupInformedConsensus(
     name: "group_informed_consensus",
     templatePath:
       "src/report_experimental/subtaskPrompts/group_informed_consensus.xml",
-    filter: (v: { group_aware_consensus: number; num_groups: number }) =>
-      (v.group_aware_consensus ?? 0) >
-      getGacThresholdByGroupCount(v.num_groups),
   };
 
   if (!storage) {
@@ -396,11 +414,22 @@ export async function handle_GET_groupInformedConsensus(
     `${rid}#${section.name}#${model}`
   );
 
-  // Use type assertion for filter function with different parameter shape but compatible runtime behavior
-  const structured_comments = await getCommentsAsXML(
-    zid,
-    section.filter as any
-  );
+  const agreeFilter = (v: { group_aware_consensus?: number; num_groups: number }) =>
+    (v.group_aware_consensus ?? 0) > getGacThresholdByGroupCount(v.num_groups);
+
+  const disagreeFilter = (v: { group_aware_consensus_disagree?: number; num_groups: number }) =>
+    (v.group_aware_consensus_disagree ?? 0) > getGacThresholdByGroupCount(v.num_groups);
+
+  const agree_comments_xml = await getCommentsAsXML(zid, agreeFilter as any);
+  const disagree_comments_xml = await getCommentsAsXML(zid, disagreeFilter as any);
+
+  const structured_comments =
+    `<agree-consensus>\n${agree_comments_xml || ''}\n</agree-consensus>\n` +
+    `<disagree-consensus>\n${disagree_comments_xml || ''}\n</disagree-consensus>`;
+
+  const hasNoContent =
+    (!agree_comments_xml || agree_comments_xml.trim().length === 0) &&
+    (!disagree_comments_xml || disagree_comments_xml.trim().length === 0);
 
   if (
     cachedResult.success &&
@@ -412,10 +441,7 @@ export async function handle_GET_groupInformedConsensus(
         [section.name]: {
           modelResponse: cachedResult.data[0].report_data,
           model,
-          errors:
-            structured_comments?.trim().length === 0
-              ? "NO_CONTENT_AFTER_FILTER"
-              : undefined,
+          errors: hasNoContent ? "NO_CONTENT_AFTER_FILTER" : undefined,
         },
       }) + `|||`
     );
@@ -448,10 +474,7 @@ export async function handle_GET_groupInformedConsensus(
       report_id: rid,
       report_data: resp,
       model,
-      errors:
-        structured_comments?.trim().length === 0
-          ? "NO_CONTENT_AFTER_FILTER"
-          : undefined,
+      errors: hasNoContent ? "NO_CONTENT_AFTER_FILTER" : undefined,
     };
 
     const putResult = await storage.putItem(reportItem);
@@ -465,10 +488,7 @@ export async function handle_GET_groupInformedConsensus(
         [section.name]: {
           modelResponse: resp,
           model,
-          errors:
-            structured_comments?.trim().length === 0
-              ? "NO_CONTENT_AFTER_FILTER"
-              : undefined,
+          errors: hasNoContent ? "NO_CONTENT_AFTER_FILTER" : undefined,
         },
       }) + `|||`
     );

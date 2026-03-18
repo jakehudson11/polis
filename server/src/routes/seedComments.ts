@@ -11,8 +11,7 @@ import pg from "../db/pg-query";
 import { addParticipant } from "../participant";
 import { getPidPromise } from "../user";
 import { detectLanguage, getComment } from "../comment";
-import { votesPost } from "./votes";
-import { updateConversationModifiedTime, updateLastInteractionTimeForConversation, updateVoteCount, safeTimestampToMillis } from "../server-helpers";
+import { updateConversationModifiedTime, updateLastInteractionTimeForConversation, safeTimestampToMillis } from "../server-helpers";
 import _ from "underscore";
 
 interface GenerateSeedCommentsRequest extends Request {
@@ -183,14 +182,6 @@ export async function handle_POST_generate_seed_comments(
         if (createdTime > lastInteractionTime) {
           lastInteractionTime = createdTime;
         }
-
-        // Add default vote for seed comment (pass/neutral)
-        await votesPost(uid!, pid, zid, tid, 0, 0, false);
-
-        // Schedule vote count update
-        setTimeout(() => {
-          updateVoteCount(zid, pid);
-        }, 100);
 
         results.push({ txt, status: "success", tid });
       } catch (err: any) {

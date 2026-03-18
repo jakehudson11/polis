@@ -27,6 +27,12 @@
         <instruction>
             Prefer Title Case (e.g., "Climate Action Advocates").
         </instruction>
+        <instruction>
+            SMALL POPULATION HANDLING: Check the participant_count for this tribe in the data payload.
+            - When participant_count is 1: this "tribe" is one person. Avoid collective labels like "Advocates" or "Supporters". Use a title that reflects an individual viewpoint rather than a group identity (e.g., "Individual Pro-Market Voice" rather than "Market-Based Advocates").
+            - When participant_count is 2 or 3: temper the title to reflect the small size. Avoid implying a broad movement or strong collective identity.
+            - When participant_count ≤ 3 and the tribe's defining statements overlap heavily with other tribes, use a more generic or tentative title rather than implying a distinct identity that the data does not support.
+        </instruction>
     </criticalInstructions>
 
     <definitions>

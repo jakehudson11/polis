@@ -164,6 +164,22 @@
                     <action>check_related_statements</action>
                 </handling>
             </case>
+            <case type="small_population">
+                <description>When total-participants is less than 10 or any group has fewer than 3 members</description>
+                <handling>
+                    <instruction>Qualify all claims as reflecting individual views, not statistical patterns</instruction>
+                    <instruction>Note the limited sample size explicitly in the overview paragraph</instruction>
+                    <instruction>Avoid strong pattern language like "consistently", "clearly", "remarkably"</instruction>
+                </handling>
+            </case>
+            <case type="identical_group_profiles">
+                <description>When groups share the same top defining statements or have near-identical vote patterns across all comments</description>
+                <handling>
+                    <instruction>Acknowledge that groups are not meaningfully distinct on these dimensions</instruction>
+                    <instruction>Note there is insufficient data to differentiate the groups</instruction>
+                    <instruction>Describe the overall participant views as a whole rather than contrasting groups</instruction>
+                </handling>
+            </case>
         </specialCases>
 
         <languageGuidelines>

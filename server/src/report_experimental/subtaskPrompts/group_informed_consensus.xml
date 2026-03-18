@@ -27,6 +27,12 @@
             at least once.
             Aim for 100% coverage of consensus comments in the dataset.
         </instruction>
+        <instruction>
+            The data contains TWO types of consensus: agree-consensus (statements the group
+            collectively supported) and disagree-consensus (statements the group collectively
+            rejected). Analyze and report on BOTH types. If either section is empty, skip
+            analysis for that type.
+        </instruction>
     </criticalInstructions>
 
     <definitions>
@@ -41,6 +47,10 @@
             <description>Statements with significant agreement aco rates</description>
             <threshold>60</threshold>
             <unit>percent</unit>
+        </term>
+        <term name="group_aware_consensus_disagree">
+            <description>Disagreement consensus across groups — statements that all groups
+                collectively rejected, indicating shared opposition</description>
         </term>
     </definitions>
 
@@ -88,6 +98,9 @@
                     consensus,
                     particularly among Group [group_name] participants who showed [percentage3]%
                     [voting, agreeing, disagreeing] on related initiatives.
+
+                    Areas of significant disagreement consensus — statements collectively rejected
+                    across all groups — included [topic3] and [topic4].
                 </format>
                 <paragraphInstructions>
                     this is a tl;dr paragraph for the entire consensus in the conversation. it is
@@ -122,6 +135,22 @@
                     - Multiple supporting citations for each claim
                 </paragraphInstructions>
                 <length>Multiple paragraphs per topic cluster, with all relevant comments cited</length>
+            </paragraph>
+
+            <paragraph type="disagreement_consensus">
+                <elements>
+                    <element>high_disagree_consensus_statements</element>
+                    <element>rejection_patterns</element>
+                </elements>
+                <paragraphInstructions>
+                    Analyze statements from the disagree-consensus data that all groups
+                    collectively rejected. Frame these as shared values — things the group
+                    united in opposing. Use language like "collectively rejected",
+                    "expressed shared opposition to", or "united in disagreeing with".
+                    If the disagree-consensus section contains no data, skip this paragraph
+                    entirely.
+                </paragraphInstructions>
+                <length>1-3 paragraphs depending on data volume</length>
             </paragraph>
         </reportingStructure>
 
@@ -162,6 +191,14 @@
                     <requirement>conceptual_relationship&gt;true</requirement>
                 </requirements>
             </case>
+            <case type="small_population_consensus">
+                <description>When total-participants is less than 10</description>
+                <handling>
+                    <instruction>Frame findings as "shared views" rather than "consensus" — true consensus requires a meaningful sample</instruction>
+                    <instruction>Note the limited statistical basis for any claims</instruction>
+                    <instruction>Use phrases like "participants expressed similar views" rather than "there was strong consensus"</instruction>
+                </handling>
+            </case>
         </specialCases>
 
         <languageGuidelines>
@@ -170,6 +207,9 @@
                 <term>expressed consensus</term>
                 <term>were aligned</term>
                 <term>agreed/disagreed on</term>
+                <term>collectively rejected</term>
+                <term>united in opposing</term>
+                <term>expressed shared opposition</term>
             </consensusTerms>
 
             <styleRules>
@@ -189,6 +229,7 @@
             <check>citations_properly_formatted</check>
             <check>language_varied_and_clear</check>
             <check>broad_coverage_of_comments</check>
+            <check>disagree_consensus_covered_if_present</check>
         </qualityChecklist>
     </analysisProcess>
 

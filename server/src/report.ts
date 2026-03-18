@@ -605,6 +605,7 @@ export async function sendCommentGroupsSummary(
     disagrees: number;
     passes: number;
     group_aware_consensus?: number;
+    group_aware_consensus_disagree?: number;
     comment_extremity?: number;
     comment_id: number;
     num_groups: number;
@@ -623,6 +624,24 @@ export async function sendCommentGroupsSummary(
     ? groupClusters.map((g) => g.id)
     : Object.keys(groupClusters as Record<string, any>).map(Number);
   const numGroups = groupIds.length;
+
+  // Compute per-group participant counts from group-clusters
+  const groupParticipantCounts: Record<number, number> = {};
+  let totalParticipants = 0;
+
+  if (Array.isArray(groupClusters)) {
+    for (const cluster of groupClusters) {
+      const memberCount = Array.isArray(cluster.members) ? cluster.members.length : 0;
+      groupParticipantCounts[cluster.id] = memberCount;
+      totalParticipants += memberCount;
+    }
+  } else {
+    for (const [gidStr, cluster] of Object.entries(groupClusters as Record<string, any>)) {
+      const memberCount = Array.isArray(cluster.members) ? cluster.members.length : 0;
+      groupParticipantCounts[Number(gidStr)] = memberCount;
+      totalParticipants += memberCount;
+    }
+  }
   const groupVotes = pca.asPOJO["group-votes"] as Record<
     number,
     GroupVoteStats
@@ -721,6 +740,20 @@ export async function sendCommentGroupsSummary(
     );
   }
 
+  // Compute group-aware consensus for DISAGREE (mirrors the Clojure agree computation)
+  const groupAwareConsensusDisagree: Record<number, number> = {};
+  for (const tid of commentStats.keys()) {
+    let score = 1.0;
+    for (const gid of groupIds) {
+      const votes = groupVotes[gid]?.votes?.[tid];
+      const D = votes?.D ?? 0;
+      const S = votes?.S ?? 0;
+      const prob = (D + 1.0) / (S + 2.0);
+      score *= prob;
+    }
+    groupAwareConsensusDisagree[tid] = score;
+  }
+
   // Format and send CSV
   if (res && http) {
     res.setHeader("content-type", "text/csv");
@@ -778,6 +811,7 @@ export async function sendCommentGroupsSummary(
         disagrees: stats.total_disagrees,
         passes: stats.total_passes,
         group_aware_consensus: groupAwareConsensus[stats.tid],
+        group_aware_consensus_disagree: groupAwareConsensusDisagree[stats.tid],
         comment_extremity: commentExtremity[tidToExtremityIndex.get(stats.tid)],
         comment_id: stats.tid,
         num_groups: numGroups,
@@ -797,7 +831,14 @@ export async function sendCommentGroupsSummary(
   if (http && res) {
     res.end();
   } else {
-    return csvText.join("");
+    return {
+      csv: csvText.join(""),
+      metadata: {
+        totalParticipants,
+        groupSizes: groupParticipantCounts,
+        numGroups,
+      },
+    };
   }
 }
 
