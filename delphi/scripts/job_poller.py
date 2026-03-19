@@ -26,6 +26,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from botocore.exceptions import ClientError
 import urllib
 
@@ -672,6 +673,13 @@ class JobProcessor:
 
         return None
 
+    @staticmethod
+    def _decimal_default(obj):
+        """JSON serialization fallback for Decimal values from DynamoDB."""
+        if isinstance(obj, Decimal):
+            return int(obj) if obj == int(obj) else float(obj)
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
     def _enqueue_create_narrative_batch_job(
         self,
         parent_job: Dict[str, Any],
@@ -685,7 +693,7 @@ class JobProcessor:
 
         # Ensure we always have a stable report_id for DynamoDB keys and URL construction.
         # Some submitters (e.g., delphi_cli) omit report_id, and some code paths may store it as null.
-        report_id = parent_job.get('report_id') or str(conversation_id)
+        report_id = str(parent_job.get('report_id') or conversation_id)
 
         model = report_stage_config.get('model') or os.environ.get('ANTHROPIC_MODEL')
         if not model:
@@ -755,7 +763,7 @@ class JobProcessor:
             'retry_count': 0,
             'max_retries': 3,
             'timeout_seconds': 14400,
-            'job_config': json.dumps(job_config),
+            'job_config': json.dumps(job_config, default=self._decimal_default),
             'job_results': json.dumps({}),
             'logs': json.dumps({
                 'entries': [
@@ -768,7 +776,7 @@ class JobProcessor:
                 'log_location': ''
             }),
             'created_by': 'poller',
-            'environment': json.dumps(env_blob),
+            'environment': json.dumps(env_blob, default=self._decimal_default),
             'parent_job_id': parent_job_id,
         }
 
