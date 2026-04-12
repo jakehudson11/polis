@@ -71,6 +71,8 @@ export default {
     return val;
   },
 
+  agoraDbUrl: process.env.AGORA_DATABASE_URL || '',
+
   adminEmailDataExport: process.env.ADMIN_EMAIL_DATA_EXPORT as string,
   adminEmailDataExportTest: process.env.ADMIN_EMAIL_DATA_EXPORT_TEST as string,
   adminEmailEmailTest: process.env.ADMIN_EMAIL_EMAIL_TEST as string,

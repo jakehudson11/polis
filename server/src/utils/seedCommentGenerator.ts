@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import Config from "../config";
 import logger from "../utils/logger";
+import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
 
 /**
  * Generates 20-25 seed comments for a Polis conversation using OpenAI.
@@ -9,7 +10,8 @@ import logger from "../utils/logger";
 export async function generateSeedComments(
   topic: string,
   description: string,
-  context: string
+  context: string,
+  zid?: number
 ): Promise<string[]> {
   if (!Config.openaiApiKey) {
     throw new Error("OpenAI API key not configured");
@@ -28,8 +30,11 @@ export async function generateSeedComments(
       contextLength: context.length,
     });
 
+    const modelConfig = await getModelConfig('seed_comment_generator');
+    const model = process.env.OPENAI_MODEL || modelConfig?.primaryModel || "gpt-4o-mini";
+
     const response = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      model,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
@@ -37,6 +42,23 @@ export async function generateSeedComments(
       temperature: 0.8,
       max_tokens: 2000,
     });
+
+    // Fire-and-forget AI usage logging
+    if (zid) {
+      (async () => {
+        const deliberationId = await mapConversationToDeliberation(zid);
+        const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
+        await logAiUsage({
+          use_case: 'seed_comment_generator',
+          model,
+          provider: 'openai',
+          input_tokens: response.usage?.prompt_tokens || 0,
+          output_tokens: response.usage?.completion_tokens || 0,
+          deliberation_id: deliberationId ?? undefined,
+          admin_user_id: adminUserId ?? undefined,
+        });
+      })().catch(() => {});
+    }
 
     const content = response.choices[0]?.message?.content;
     if (!content) {

@@ -20,6 +20,7 @@ import type { FileHandle } from "node:fs/promises";
 import { PathLike } from "node:fs";
 import config from "../config";
 import logger from "../utils/logger";
+import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const js2xmlparser = require("js2xmlparser");
@@ -205,7 +206,8 @@ const getModelResponse = async (
   system_lore: string,
   prompt_xml: string,
   modelVersion?: string,
-  isTopic?: boolean
+  isTopic?: boolean,
+  zid?: number
 ) => {
   try {
     if (isTopic && countTokens(prompt_xml) > 30000) {
@@ -297,8 +299,10 @@ const getModelResponse = async (
         if (!anthropic) {
           throw new Error("polis_err_anthropic_api_key_not_set");
         }
+        const delphiModelConfig = await getModelConfig('delphi_report');
+        const claudeModel = modelVersion || delphiModelConfig?.primaryModel || "claude-3-7-sonnet-20250219";
         const responseClaude = await anthropic.messages.create({
-          model: modelVersion || "claude-3-7-sonnet-20250219",
+          model: claudeModel,
           max_tokens: 3000,
           temperature: 0,
           system: system_lore,
@@ -313,6 +317,22 @@ const getModelResponse = async (
             },
           ],
         });
+        // Fire-and-forget AI usage logging
+        if (zid) {
+          (async () => {
+            const deliberationId = await mapConversationToDeliberation(zid);
+            const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
+            await logAiUsage({
+              use_case: 'delphi_report',
+              model: claudeModel,
+              provider: 'anthropic',
+              input_tokens: (responseClaude as any).usage?.input_tokens || 0,
+              output_tokens: (responseClaude as any).usage?.output_tokens || 0,
+              deliberation_id: deliberationId ?? undefined,
+              admin_user_id: adminUserId ?? undefined,
+            });
+          })().catch(() => {});
+        }
         // Claude API response structure might change with version updates
         return `{${(responseClaude as any)?.content[0]?.text}`;
       }
@@ -465,7 +485,9 @@ export async function handle_GET_groupInformedConsensus(
       model,
       system_lore,
       prompt_xml,
-      modelVersion
+      modelVersion,
+      undefined,
+      zid
     );
 
     const reportItem = {
@@ -573,7 +595,9 @@ export async function handle_GET_uncertainty(
           model,
           system_lore,
           prompt_xml,
-          modelVersion
+          modelVersion,
+          undefined,
+          zid
         );
 
         const reportItem = {
@@ -689,7 +713,9 @@ export async function handle_GET_groups(
           model,
           system_lore,
           prompt_xml,
-          modelVersion
+          modelVersion,
+          undefined,
+          zid
         );
 
         const reportItem = {
@@ -848,7 +874,8 @@ export async function handle_GET_topics(
                 system_lore,
                 prompt_xml,
                 modelVersion,
-                true
+                true,
+                zid
               );
 
               const reportItem = {

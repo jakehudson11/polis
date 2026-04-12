@@ -8,6 +8,7 @@ import {
   QueryCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { getZidFromReport } from "../utils/parameter";
+import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
 import Config from "../config";
 import Anthropic from "@anthropic-ai/sdk";
 import { v4 as uuidv4 } from "uuid";
@@ -143,8 +144,10 @@ ${JSON.stringify(formattedComments, null, 2)}
 You MUST respond with valid JSON that follows the exact schema above. Each clause must have at least one citation.`;
 
   try {
+    const delphiModelConfig = await getModelConfig('delphi_report');
+    const claudeModel = delphiModelConfig?.primaryModel || "claude-sonnet-4-20250514";
     const response = await anthropic.messages.create({
-      model: "claude-opus-4-20250514",
+      model: claudeModel,
       max_tokens: 3000,
       temperature: 0.7,
       system: systemPrompt,
@@ -159,6 +162,21 @@ You MUST respond with valid JSON that follows the exact schema above. Each claus
         },
       ],
     });
+
+    // Fire-and-forget AI usage logging
+    (async () => {
+      const deliberationId = await mapConversationToDeliberation(zid);
+      const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
+      await logAiUsage({
+        use_case: 'delphi_report',
+        model: claudeModel,
+        provider: 'anthropic',
+        input_tokens: (response as any).usage?.input_tokens || 0,
+        output_tokens: (response as any).usage?.output_tokens || 0,
+        deliberation_id: deliberationId ?? undefined,
+        admin_user_id: adminUserId ?? undefined,
+      });
+    })().catch(() => {});
 
     // Parse the JSON response
     const responseText =
@@ -340,7 +358,7 @@ export async function handle_POST_collectiveStatement(
       statement_data: JSON.stringify(result.statementData),
       comments_data: JSON.stringify(result.commentsData),
       created_at: new Date().toISOString(),
-      model: "claude-opus-4-20250514",
+      model: "claude-sonnet-4-20250514",
     };
 
     await docClient.send(

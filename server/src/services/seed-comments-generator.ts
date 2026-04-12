@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import Config from "../config";
 import logger from "../utils/logger";
+import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
 
 interface SeedCommentGenerationRequest {
   context: string;
@@ -29,7 +30,7 @@ class SeedCommentsGeneratorService {
    * @param request - The request containing problem statement and context
    * @returns Array of seed comment strings
    */
-  async generateSeedComments(request: SeedCommentGenerationRequest): Promise<string[]> {
+  async generateSeedComments(request: SeedCommentGenerationRequest, zid?: number): Promise<string[]> {
     try {
       const { context, topic, description } = request;
 
@@ -94,7 +95,8 @@ The final output must contain a deliberate 50:50 balance between comments that r
 
 ${context}`;
 
-      const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+      const modelConfig = await getModelConfig('seed_comment_generator');
+      const model = process.env.OPENAI_MODEL || modelConfig?.primaryModel || "gpt-4o-mini";
 
       const response = await this.openai.chat.completions.create({
         model,
@@ -107,6 +109,23 @@ ${context}`;
         temperature: 0.7,
         max_tokens: 4000, // Allow enough tokens for 25-40 comments
       });
+
+      // Fire-and-forget AI usage logging
+      if (zid) {
+        (async () => {
+          const deliberationId = await mapConversationToDeliberation(zid);
+          const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
+          await logAiUsage({
+            use_case: 'seed_comment_generator',
+            model,
+            provider: 'openai',
+            input_tokens: response.usage?.prompt_tokens || 0,
+            output_tokens: response.usage?.completion_tokens || 0,
+            deliberation_id: deliberationId ?? undefined,
+            admin_user_id: adminUserId ?? undefined,
+          });
+        })().catch(() => {});
+      }
 
       const content = response.choices[0]?.message?.content || "";
       if (!content.trim()) {

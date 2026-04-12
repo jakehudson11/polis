@@ -86,7 +86,7 @@ export async function handle_POST_generate_seed_comments(
       contextLength: context.length,
     });
 
-    const seedComments = await generateSeedComments(topic, description, context);
+    const seedComments = await generateSeedComments(topic, description, context, zid);
 
     if (!seedComments || seedComments.length === 0) {
       failJson(

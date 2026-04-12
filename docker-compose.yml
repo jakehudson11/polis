@@ -26,6 +26,9 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - DATABASE_SSL=${DATABASE_SSL:-false}
       
+      # Agora cross-platform DB (for AI usage logging)
+      - AGORA_DATABASE_URL=${AGORA_DATABASE_URL:-postgresql://agora:agorapass@agora-postgres:5432/agora}
+      
       # JWT Configuration
       - POLIS_JWT_SECRET=${POLIS_JWT_SECRET}
       - POLIS_JWT_ISSUER=${POLIS_JWT_ISSUER:-https://pol.is/}
