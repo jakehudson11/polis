@@ -1,6 +1,7 @@
-import OpenAI from "openai";
 import Config from "../config";
 import logger from "../utils/logger";
+import { getOpenAIClient } from "../utils/aiClients";
+import { callWithFallback, AI_TIMEOUTS } from "../utils/aiResilience";
 
 /**
  * Generates guiding questions for administrators to provide internal information.
@@ -11,14 +12,6 @@ export async function generateGuidingQuestions(
   description: string,
   context: string
 ): Promise<string> {
-  if (!Config.openaiApiKey) {
-    throw new Error("OpenAI API key not configured");
-  }
-
-  const openai = new OpenAI({
-    apiKey: Config.openaiApiKey,
-  });
-
   const systemPrompt = buildSystemPrompt();
   const userPrompt = buildUserPrompt(topic, description, context);
 
@@ -28,14 +21,23 @@ export async function generateGuidingQuestions(
       contextLength: context.length,
     });
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4-turbo-preview",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.7,
-      max_tokens: 2000,
+    const response = await callWithFallback({
+      label: 'guiding_questions',
+      primaryModel: 'gpt-4-turbo-preview',
+      primaryProvider: 'openai',
+      primaryFn: async (model, _provider) => {
+        const client = getOpenAIClient();
+        return client.chat.completions.create({
+          model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
+          temperature: 0.7,
+          max_tokens: 2000,
+        });
+      },
+      timeout: AI_TIMEOUTS.STANDARD,
     });
 
     const content = response.choices[0]?.message?.content;

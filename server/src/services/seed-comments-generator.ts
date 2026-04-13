@@ -1,7 +1,8 @@
-import OpenAI from "openai";
 import Config from "../config";
 import logger from "../utils/logger";
 import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
+import { getOpenAIClient } from "../utils/aiClients";
+import { callWithFallback, AI_TIMEOUTS } from "../utils/aiResilience";
 
 interface SeedCommentGenerationRequest {
   context: string;
@@ -14,15 +15,8 @@ interface SeedCommentGenerationResponse {
 }
 
 class SeedCommentsGeneratorService {
-  private openai: OpenAI;
-
   constructor() {
-    if (!Config.openaiApiKey) {
-      throw new Error("OPENAI_API_KEY is not configured");
-    }
-    this.openai = new OpenAI({
-      apiKey: Config.openaiApiKey,
-    });
+    // Singleton OpenAI client is obtained via getOpenAIClient()
   }
 
   /**
@@ -98,16 +92,25 @@ ${context}`;
       const modelConfig = await getModelConfig('seed_comment_generator');
       const model = process.env.OPENAI_MODEL || modelConfig?.primaryModel || "gpt-4o-mini";
 
-      const response = await this.openai.chat.completions.create({
-        model,
-        messages: [
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-        temperature: 0.7,
-        max_tokens: 4000, // Allow enough tokens for 25-40 comments
+      const response = await callWithFallback({
+        label: 'seed_comments_service',
+        primaryModel: model,
+        primaryProvider: 'openai',
+        primaryFn: async (m, _p) => {
+          const client = getOpenAIClient();
+          return client.chat.completions.create({
+            model: m,
+            messages: [
+              {
+                role: "user",
+                content: prompt,
+              },
+            ],
+            temperature: 0.7,
+            max_tokens: 4000,
+          });
+        },
+        timeout: AI_TIMEOUTS.STANDARD,
       });
 
       // Fire-and-forget AI usage logging

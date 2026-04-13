@@ -1,7 +1,8 @@
-import OpenAI from "openai";
 import Config from "../config";
 import logger from "../utils/logger";
 import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
+import { getOpenAIClient } from "../utils/aiClients";
+import { callWithFallback, AI_TIMEOUTS } from "../utils/aiResilience";
 
 /**
  * Generates 20-25 seed comments for a Polis conversation using OpenAI.
@@ -13,14 +14,6 @@ export async function generateSeedComments(
   context: string,
   zid?: number
 ): Promise<string[]> {
-  if (!Config.openaiApiKey) {
-    throw new Error("OpenAI API key not configured");
-  }
-
-  const openai = new OpenAI({
-    apiKey: Config.openaiApiKey,
-  });
-
   const systemPrompt = buildSystemPrompt();
   const userPrompt = buildUserPrompt(topic, description, context);
 
@@ -33,14 +26,23 @@ export async function generateSeedComments(
     const modelConfig = await getModelConfig('seed_comment_generator');
     const model = process.env.OPENAI_MODEL || modelConfig?.primaryModel || "gpt-4o-mini";
 
-    const response = await openai.chat.completions.create({
-      model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.8,
-      max_tokens: 2000,
+    const response = await callWithFallback({
+      label: 'seed_comments',
+      primaryModel: model,
+      primaryProvider: 'openai',
+      primaryFn: async (m, _p) => {
+        const client = getOpenAIClient();
+        return client.chat.completions.create({
+          model: m,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
+          temperature: 0.8,
+          max_tokens: 2000,
+        });
+      },
+      timeout: AI_TIMEOUTS.STANDARD,
     });
 
     // Fire-and-forget AI usage logging
