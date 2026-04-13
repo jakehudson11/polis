@@ -3,6 +3,7 @@ import logger from "../utils/logger";
 import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
 import { getOpenAIClient } from "../utils/aiClients";
 import { callWithFallback, AI_TIMEOUTS } from "../utils/aiResilience";
+import { AI_PRIORITY } from "../utils/aiProviderQueues";
 
 interface SeedCommentGenerationRequest {
   context: string;
@@ -111,6 +112,7 @@ ${context}`;
           });
         },
         timeout: AI_TIMEOUTS.STANDARD,
+        priority: AI_PRIORITY.BACKGROUND,
       });
 
       // Fire-and-forget AI usage logging

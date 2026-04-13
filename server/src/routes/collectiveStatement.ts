@@ -15,6 +15,7 @@ import pgQuery from "../db/pg-query";
 import { getCommentIdsForCluster } from "../utils/commentClusters";
 import { getAnthropicClient } from "../utils/aiClients";
 import { callWithFallback, AI_TIMEOUTS } from "../utils/aiResilience";
+import { AI_PRIORITY } from "../utils/aiProviderQueues";
 
 const dynamoDBConfig: any = {
   region: Config.AWS_REGION || "us-east-1",
@@ -171,6 +172,7 @@ You MUST respond with valid JSON that follows the exact schema above. Each claus
         });
       },
       timeout: AI_TIMEOUTS.REPORT,
+      priority: AI_PRIORITY.BACKGROUND,
     });
 
     // Fire-and-forget AI usage logging

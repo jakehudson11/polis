@@ -1,4 +1,5 @@
 import CircuitBreaker from 'opossum';
+import { enqueueAiCall } from './aiProviderQueues';
 
 // ─── Timeout Constants ─────────────────────────────────────
 
@@ -137,6 +138,7 @@ export async function callWithFallback<T>(options: {
   backupFn?: (model: string, provider: string) => Promise<T>;
   timeout?: number;
   maxRetries?: number;
+  priority?: number;
 }): Promise<T> {
   const {
     label,
@@ -148,15 +150,20 @@ export async function callWithFallback<T>(options: {
     backupFn,
     timeout,
     maxRetries,
+    priority,
   } = options;
 
   const primaryBreaker = getCircuitBreaker(primaryProvider);
   let primaryError: unknown;
 
   try {
-    return await retryWithBackoff(
-      () => primaryBreaker.fire(() => primaryFn(primaryModel, primaryProvider)) as Promise<T>,
-      { maxRetries: maxRetries ?? 2, timeout },
+    return await enqueueAiCall(
+      primaryProvider,
+      () => retryWithBackoff(
+        () => primaryBreaker.fire(() => primaryFn(primaryModel, primaryProvider)) as Promise<T>,
+        { maxRetries: maxRetries ?? 2, timeout },
+      ),
+      priority,
     );
   } catch (err) {
     primaryError = err;
@@ -173,9 +180,13 @@ export async function callWithFallback<T>(options: {
   const backupCall = backupFn ?? primaryFn;
 
   try {
-    return await retryWithBackoff(
-      () => backupBreaker.fire(() => backupCall(backupModel, backupProvider)) as Promise<T>,
-      { maxRetries: 3, timeout },
+    return await enqueueAiCall(
+      backupProvider,
+      () => retryWithBackoff(
+        () => backupBreaker.fire(() => backupCall(backupModel, backupProvider)) as Promise<T>,
+        { maxRetries: 3, timeout },
+      ),
+      priority,
     );
   } catch (backupError) {
     console.error(

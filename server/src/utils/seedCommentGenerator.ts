@@ -3,6 +3,7 @@ import logger from "../utils/logger";
 import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
 import { getOpenAIClient } from "../utils/aiClients";
 import { callWithFallback, AI_TIMEOUTS } from "../utils/aiResilience";
+import { AI_PRIORITY } from "../utils/aiProviderQueues";
 
 /**
  * Generates 20-25 seed comments for a Polis conversation using OpenAI.
@@ -43,6 +44,7 @@ export async function generateSeedComments(
         });
       },
       timeout: AI_TIMEOUTS.STANDARD,
+      priority: AI_PRIORITY.BACKGROUND,
     });
 
     // Fire-and-forget AI usage logging

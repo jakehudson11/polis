@@ -2,6 +2,7 @@ import Config from "../config";
 import logger from "../utils/logger";
 import { getOpenAIClient } from "../utils/aiClients";
 import { callWithFallback, AI_TIMEOUTS } from "../utils/aiResilience";
+import { AI_PRIORITY } from "../utils/aiProviderQueues";
 
 /**
  * Generates guiding questions for administrators to provide internal information.
@@ -38,6 +39,7 @@ export async function generateGuidingQuestions(
         });
       },
       timeout: AI_TIMEOUTS.STANDARD,
+      priority: AI_PRIORITY.BACKGROUND,
     });
 
     const content = response.choices[0]?.message?.content;

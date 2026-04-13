@@ -4,6 +4,7 @@ import pgQuery from "../../db/pg-query";
 import { BaseAgent } from "./baseAgent";
 import { getAnthropicClient } from "../../utils/aiClients";
 import { retryWithBackoff, AI_TIMEOUTS } from "../../utils/aiResilience";
+import { enqueueAiCall, AI_PRIORITY } from "../../utils/aiProviderQueues";
 
 interface SpeakingTimeParticipant {
   speaker_pid: number | null;
@@ -91,18 +92,22 @@ export class SpeakingTimeMonitorAgent extends BaseAgent {
     // Use Claude to make it more natural if desired
     try {
       const anthropic = getAnthropicClient();
-      const response = await retryWithBackoff(
-        () => anthropic.messages.create({
-          model: "claude-3-5-sonnet-20241022",
-          max_tokens: 150,
-          messages: [
-            {
-              role: "user",
-              content: `Format this speaking time data into a friendly, concise message for a meeting chat:\n\n${message}\n\nMake it brief and encouraging balanced participation.`,
-            },
-          ],
-        }),
-        { maxRetries: 2, timeout: AI_TIMEOUTS.STANDARD }
+      const response = await enqueueAiCall(
+        'anthropic',
+        () => retryWithBackoff(
+          () => anthropic.messages.create({
+            model: "claude-3-5-sonnet-20241022",
+            max_tokens: 150,
+            messages: [
+              {
+                role: "user",
+                content: `Format this speaking time data into a friendly, concise message for a meeting chat:\n\n${message}\n\nMake it brief and encouraging balanced participation.`,
+              },
+            ],
+          }),
+          { maxRetries: 2, timeout: AI_TIMEOUTS.STANDARD }
+        ),
+        AI_PRIORITY.INTERACTIVE,
       );
 
       const formatted =

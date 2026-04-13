@@ -3,6 +3,7 @@ import logger from "../../utils/logger";
 import { BaseAgent, MeetingContext, TranscriptSegment } from "./baseAgent";
 import { getAnthropicClient } from "../../utils/aiClients";
 import { retryWithBackoff, AI_TIMEOUTS } from "../../utils/aiResilience";
+import { enqueueAiCall, AI_PRIORITY } from "../../utils/aiProviderQueues";
 
 export class ModeratorAgent extends BaseAgent {
   constructor() {
@@ -41,18 +42,22 @@ The question should be open-ended and encourage thoughtful discussion. Be concis
 
     try {
       const anthropic = getAnthropicClient();
-      const response = await retryWithBackoff(
-        () => anthropic.messages.create({
-          model: "claude-3-5-sonnet-20241022",
-          max_tokens: 200,
-          messages: [
-            {
-              role: "user",
-              content: prompt,
-            },
-          ],
-        }),
-        { maxRetries: 2, timeout: AI_TIMEOUTS.STANDARD }
+      const response = await enqueueAiCall(
+        'anthropic',
+        () => retryWithBackoff(
+          () => anthropic.messages.create({
+            model: "claude-3-5-sonnet-20241022",
+            max_tokens: 200,
+            messages: [
+              {
+                role: "user",
+                content: prompt,
+              },
+            ],
+          }),
+          { maxRetries: 2, timeout: AI_TIMEOUTS.STANDARD }
+        ),
+        AI_PRIORITY.INTERACTIVE,
       );
 
       const question =
