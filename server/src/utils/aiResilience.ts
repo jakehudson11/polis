@@ -126,6 +126,23 @@ export function getCircuitBreaker(provider: string): CircuitBreaker {
   return breaker;
 }
 
+// ─── Inline metrics logging ─────────────────────────────
+
+function classifyError(err: unknown): string {
+  const status = (err as { status?: number }).status;
+  const code = (err as { code?: string }).code;
+  if (status === 429) return 'rate_limit';
+  if (status === 408 || code === 'ETIMEDOUT') return 'timeout';
+  if (status && status >= 500) return 'server_error';
+  if (code === 'ECONNRESET' || code === 'ENOTFOUND') return 'network_error';
+  if ((err as Error)?.message?.includes('circuit')) return 'circuit_open';
+  return 'unknown';
+}
+
+function logMetrics(provider: string, latencyMs: number, success: boolean, errorType?: string): void {
+  console.log(`[ai-metrics] ${provider} call: ${latencyMs}ms, success: ${success}${errorType ? `, error: ${errorType}` : ''}`);
+}
+
 // ─── callWithFallback ──────────────────────────────────────
 
 export async function callWithFallback<T>(options: {
@@ -156,8 +173,9 @@ export async function callWithFallback<T>(options: {
   const primaryBreaker = getCircuitBreaker(primaryProvider);
   let primaryError: unknown;
 
+  const startTime = Date.now();
   try {
-    return await enqueueAiCall(
+    const result = await enqueueAiCall(
       primaryProvider,
       () => retryWithBackoff(
         () => primaryBreaker.fire(() => primaryFn(primaryModel, primaryProvider)) as Promise<T>,
@@ -165,7 +183,10 @@ export async function callWithFallback<T>(options: {
       ),
       priority,
     );
+    logMetrics(primaryProvider, Date.now() - startTime, true);
+    return result;
   } catch (err) {
+    logMetrics(primaryProvider, Date.now() - startTime, false, classifyError(err));
     primaryError = err;
     console.warn(
       `[ai-fallback] Primary ${primaryProvider}/${primaryModel} failed for ${label}, trying backup`
@@ -179,8 +200,9 @@ export async function callWithFallback<T>(options: {
   const backupBreaker = getCircuitBreaker(backupProvider);
   const backupCall = backupFn ?? primaryFn;
 
+  const backupStart = Date.now();
   try {
-    return await enqueueAiCall(
+    const result = await enqueueAiCall(
       backupProvider,
       () => retryWithBackoff(
         () => backupBreaker.fire(() => backupCall(backupModel, backupProvider)) as Promise<T>,
@@ -188,7 +210,10 @@ export async function callWithFallback<T>(options: {
       ),
       priority,
     );
+    logMetrics(backupProvider, Date.now() - backupStart, true);
+    return result;
   } catch (backupError) {
+    logMetrics(backupProvider, Date.now() - backupStart, false, classifyError(backupError));
     console.error(
       `[ai-fallback] Backup ${backupProvider}/${backupModel} also failed for ${label}`
     );
