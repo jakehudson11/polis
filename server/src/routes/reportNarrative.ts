@@ -21,6 +21,9 @@ import { PathLike } from "node:fs";
 import config from "../config";
 import logger from "../utils/logger";
 import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
+import { getOpenAIClient, getAnthropicClient, getGeminiClient } from "../utils/aiClients";
+import { callWithFallback, retryWithBackoff, AI_TIMEOUTS } from "../utils/aiResilience";
+import { enqueueAiCall, AI_PRIORITY } from "../utils/aiProviderQueues";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const js2xmlparser = require("js2xmlparser");
@@ -113,15 +116,13 @@ export class PolisConverter {
   }
 }
 
-const anthropic = config.anthropicApiKey
-  ? new Anthropic({
-      apiKey: config.anthropicApiKey,
-    })
-  : null;
+const anthropic = (() => {
+  try { return getAnthropicClient(); } catch { return null; }
+})();
 
-const genAI = config.geminiApiKey
-  ? new GoogleGenerativeAI(config.geminiApiKey)
-  : null;
+const genAI = (() => {
+  try { return getGeminiClient(); } catch { return null; }
+})();
 
 const getCommentsAsXML = async (
   id: number,
@@ -280,18 +281,23 @@ const getModelResponse = async (
       ],
       systemInstruction: system_lore,
     };
-    const openai = config.openaiApiKey
-      ? new OpenAI({
-          apiKey: config.openaiApiKey,
-        })
-      : null;
+    const openai = (() => {
+      try { return getOpenAIClient(); } catch { return null; }
+    })();
 
     switch (model) {
       case "gemini": {
         if (!gemeniModel) {
           throw new Error("polis_err_gemini_api_key_not_set");
         }
-        const respGem = await gemeniModel.generateContent(gemeniModelprompt);
+        const respGem = await enqueueAiCall(
+          'google',
+          () => retryWithBackoff(
+            () => gemeniModel.generateContent(gemeniModelprompt),
+            { maxRetries: 2, timeout: AI_TIMEOUTS.REPORT }
+          ),
+          AI_PRIORITY.BACKGROUND,
+        );
         const result = await respGem.response.text();
         return result;
       }
@@ -301,22 +307,29 @@ const getModelResponse = async (
         }
         const delphiModelConfig = await getModelConfig('delphi_report');
         const claudeModel = modelVersion || delphiModelConfig?.primaryModel || "claude-3-7-sonnet-20250219";
-        const responseClaude = await anthropic.messages.create({
-          model: claudeModel,
-          max_tokens: 3000,
-          temperature: 0,
-          system: system_lore,
-          messages: [
-            {
-              role: "user",
-              content: [{ type: "text", text: prompt_xml }],
-            },
-            {
-              role: "assistant",
-              content: [{ type: "text", text: "{" }],
-            },
-          ],
-        });
+        const responseClaude = await enqueueAiCall(
+          'anthropic',
+          () => retryWithBackoff(
+            () => anthropic.messages.create({
+              model: claudeModel,
+              max_tokens: 3000,
+              temperature: 0,
+              system: system_lore,
+              messages: [
+                {
+                  role: "user",
+                  content: [{ type: "text", text: prompt_xml }],
+                },
+                {
+                  role: "assistant",
+                  content: [{ type: "text", text: "{" }],
+                },
+              ],
+            }),
+            { maxRetries: 2, timeout: AI_TIMEOUTS.REPORT }
+          ),
+          AI_PRIORITY.BACKGROUND,
+        );
         // Fire-and-forget AI usage logging
         if (zid) {
           (async () => {
@@ -340,13 +353,20 @@ const getModelResponse = async (
         if (!openai) {
           throw new Error("polis_err_openai_api_key_not_set");
         }
-        const responseOpenAI = await openai.chat.completions.create({
-          model: modelVersion || "gpt-4o",
-          messages: [
-            { role: "system", content: system_lore },
-            { role: "user", content: prompt_xml },
-          ],
-        });
+        const responseOpenAI = await enqueueAiCall(
+          'openai',
+          () => retryWithBackoff(
+            () => openai.chat.completions.create({
+              model: modelVersion || "gpt-4o",
+              messages: [
+                { role: "system", content: system_lore },
+                { role: "user", content: prompt_xml },
+              ],
+            }),
+            { maxRetries: 2, timeout: AI_TIMEOUTS.REPORT }
+          ),
+          AI_PRIORITY.BACKGROUND,
+        );
         return responseOpenAI.choices[0].message.content;
       }
       default:

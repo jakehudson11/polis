@@ -10,10 +10,12 @@ import {
 import { getZidFromReport } from "../utils/parameter";
 import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
 import Config from "../config";
-import Anthropic from "@anthropic-ai/sdk";
 import { v4 as uuidv4 } from "uuid";
 import pgQuery from "../db/pg-query";
 import { getCommentIdsForCluster } from "../utils/commentClusters";
+import { getAnthropicClient } from "../utils/aiClients";
+import { callWithFallback, AI_TIMEOUTS } from "../utils/aiResilience";
+import { AI_PRIORITY } from "../utils/aiProviderQueues";
 
 const dynamoDBConfig: any = {
   region: Config.AWS_REGION || "us-east-1",
@@ -40,11 +42,9 @@ const docClient = DynamoDBDocumentClient.from(client, {
   },
 });
 
-const anthropic = Config.anthropicApiKey
-  ? new Anthropic({
-      apiKey: Config.anthropicApiKey,
-    })
-  : null;
+const anthropic = (() => {
+  try { return getAnthropicClient(); } catch { return null; }
+})();
 
 /**
  * Generate a collective statement for a topic using Claude
@@ -146,21 +146,33 @@ You MUST respond with valid JSON that follows the exact schema above. Each claus
   try {
     const delphiModelConfig = await getModelConfig('delphi_report');
     const claudeModel = delphiModelConfig?.primaryModel || "claude-sonnet-4-20250514";
-    const response = await anthropic.messages.create({
-      model: claudeModel,
-      max_tokens: 3000,
-      temperature: 0.7,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: userPrompt,
-        },
-        {
-          role: "assistant",
-          content: "{",
-        },
-      ],
+    const response = await callWithFallback({
+      label: 'collective_statement',
+      primaryModel: claudeModel,
+      primaryProvider: 'anthropic',
+      primaryFn: async (model, _provider) => {
+        if (!anthropic) {
+          throw new Error("Anthropic API key not configured");
+        }
+        return anthropic.messages.create({
+          model,
+          max_tokens: 3000,
+          temperature: 0.7,
+          system: systemPrompt,
+          messages: [
+            {
+              role: "user",
+              content: userPrompt,
+            },
+            {
+              role: "assistant",
+              content: "{",
+            },
+          ],
+        });
+      },
+      timeout: AI_TIMEOUTS.REPORT,
+      priority: AI_PRIORITY.BACKGROUND,
     });
 
     // Fire-and-forget AI usage logging

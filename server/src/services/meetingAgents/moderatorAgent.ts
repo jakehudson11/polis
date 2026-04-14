@@ -1,19 +1,14 @@
-import Anthropic from "@anthropic-ai/sdk";
 import Config from "../../config";
 import logger from "../../utils/logger";
 import { BaseAgent, MeetingContext, TranscriptSegment } from "./baseAgent";
+import { getAnthropicClient } from "../../utils/aiClients";
+import { retryWithBackoff, AI_TIMEOUTS } from "../../utils/aiResilience";
+import { enqueueAiCall, AI_PRIORITY } from "../../utils/aiProviderQueues";
 
 export class ModeratorAgent extends BaseAgent {
-  private anthropic: Anthropic;
-
   constructor() {
     super("moderator");
-    if (!Config.anthropicApiKey) {
-      throw new Error("ANTHROPIC_API_KEY is not configured");
-    }
-    this.anthropic = new Anthropic({
-      apiKey: Config.anthropicApiKey,
-    });
+    // Singleton Anthropic client is obtained via getAnthropicClient()
   }
 
   /**
@@ -46,16 +41,24 @@ Generate a single posing question (1-2 sentences) that will help the group:
 The question should be open-ended and encourage thoughtful discussion. Be concise and direct.`;
 
     try {
-      const response = await this.anthropic.messages.create({
-        model: "claude-3-5-sonnet-20241022",
-        max_tokens: 200,
-        messages: [
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-      });
+      const anthropic = getAnthropicClient();
+      const response = await enqueueAiCall(
+        'anthropic',
+        () => retryWithBackoff(
+          () => anthropic.messages.create({
+            model: "claude-3-5-sonnet-20241022",
+            max_tokens: 200,
+            messages: [
+              {
+                role: "user",
+                content: prompt,
+              },
+            ],
+          }),
+          { maxRetries: 2, timeout: AI_TIMEOUTS.STANDARD }
+        ),
+        AI_PRIORITY.INTERACTIVE,
+      );
 
       const question =
         response.content[0]?.type === "text"
