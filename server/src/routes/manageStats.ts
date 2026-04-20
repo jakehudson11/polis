@@ -220,11 +220,13 @@ export async function handle_GET_participationStats(
        ),
        participant_stats AS (
          SELECT
-           COALESCE(v.pid, c.pid) AS pid,
+           p.pid,
            COALESCE(v.votes, 0)::int AS votes,
            COALESCE(c.comments, 0)::int AS comments
-         FROM vote_counts v
-         FULL OUTER JOIN comment_counts c ON c.pid = v.pid
+         FROM participants p
+         LEFT JOIN vote_counts v ON v.pid = p.pid
+         LEFT JOIN comment_counts c ON c.pid = p.pid
+         WHERE p.zid = ($1)
        )
        , participant_with_user AS (
          SELECT
@@ -271,11 +273,13 @@ export async function handle_GET_participationStats(
        ),
        participant_stats AS (
          SELECT
-           COALESCE(v.pid, c.pid) AS pid,
+           p.pid,
            COALESCE(v.votes, 0)::int AS votes,
            COALESCE(c.comments, 0)::int AS comments
-         FROM vote_counts v
-         FULL OUTER JOIN comment_counts c ON c.pid = v.pid
+         FROM participants p
+         LEFT JOIN vote_counts v ON v.pid = p.pid
+         LEFT JOIN comment_counts c ON c.pid = p.pid
+         WHERE p.zid = ($1)
        )
        SELECT
          ps.pid,

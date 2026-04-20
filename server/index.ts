@@ -5,6 +5,7 @@
 import app from "./app";
 import Config from "./src/config";
 import logger from "./src/utils/logger";
+import { initProviderQueues } from "./src/utils/aiProviderQueues";
 
 if (Config.nodeEnv === "production") {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-var-requires
@@ -16,7 +17,8 @@ if (Config.nodeEnv === "production") {
  * @param {number} [port=Config.serverPort] - The port to listen on
  * @returns {Object} The server instance
  */
-function startServer(port = Config.serverPort) {
+async function startServer(port = Config.serverPort) {
+  await initProviderQueues();
   const server = app.listen(port);
   logger.info(`Server started on port ${port}`);
   return server;
