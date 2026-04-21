@@ -27,7 +27,7 @@ services:
       - DATABASE_SSL=${DATABASE_SSL:-false}
       
       # Agora cross-platform DB (for AI usage logging)
-      - AGORA_DATABASE_URL=${AGORA_DATABASE_URL:-postgresql://agora:agorapass@agora-postgres:5432/agora}
+      - AGORA_DATABASE_URL=${AGORA_DATABASE_URL:-postgresql://agora:agora@agora-postgres:5432/agora}
       
       # JWT Configuration
       - POLIS_JWT_SECRET=${POLIS_JWT_SECRET}
@@ -73,6 +73,7 @@ services:
       - "${API_SERVER_PORT:-5000}:5000"
     networks:
       - polis-net
+      - agora-net
     depends_on:
       - polis-postgres
     volumes:
@@ -299,6 +300,9 @@ services:
 networks:
   polis-net:
     driver: bridge
+  agora-net:
+    external: true
+    name: agora-dev_agora-net
 
 volumes:
   polis-postgres-data:
