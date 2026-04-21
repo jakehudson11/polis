@@ -1,9 +1,9 @@
 import Config from "../config";
 import logger from "../utils/logger";
 import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
-import { getOpenAIClient } from "../utils/aiClients";
 import { callWithFallback, AI_TIMEOUTS } from "../utils/aiResilience";
 import { AI_PRIORITY } from "../utils/aiProviderQueues";
+import { callAIProvider } from "./aiModelRouter";
 
 /**
  * Generates 20-25 seed comments for a Polis conversation using OpenAI.
@@ -26,22 +26,25 @@ export async function generateSeedComments(
 
     const modelConfig = await getModelConfig('seed_comment_generator');
     const model = process.env.OPENAI_MODEL || modelConfig?.primaryModel || "gpt-4o-mini";
+    const primaryProvider = modelConfig?.primaryProvider ?? 'openai';
 
     const response = await callWithFallback({
       label: 'seed_comments',
       primaryModel: model,
-      primaryProvider: 'openai',
-      primaryFn: async (m, _p) => {
-        const client = getOpenAIClient();
-        return client.chat.completions.create({
-          model: m,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt },
-          ],
-          temperature: 0.8,
-          max_tokens: 2000,
-        });
+      primaryProvider,
+      backupModel: modelConfig?.backupModel ?? undefined,
+      backupProvider: modelConfig?.backupProvider ?? undefined,
+      primaryFn: async (model, provider) => {
+        return callAIProvider(model, provider, [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ], { maxTokens: 2000, temperature: 0.8 });
+      },
+      backupFn: async (model, provider) => {
+        return callAIProvider(model, provider, [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ], { maxTokens: 2000, temperature: 0.8 });
       },
       timeout: AI_TIMEOUTS.STANDARD,
       priority: AI_PRIORITY.BACKGROUND,
@@ -55,16 +58,16 @@ export async function generateSeedComments(
         await logAiUsage({
           use_case: 'seed_comment_generator',
           model,
-          provider: 'openai',
-          input_tokens: response.usage?.prompt_tokens || 0,
-          output_tokens: response.usage?.completion_tokens || 0,
+          provider: modelConfig?.primaryProvider ?? 'openai',
+          input_tokens: response.inputTokens,
+          output_tokens: response.outputTokens,
           deliberation_id: deliberationId ?? undefined,
           admin_user_id: adminUserId ?? undefined,
         });
       })().catch(() => {});
     }
 
-    const content = response.choices[0]?.message?.content;
+    const content = response.content;
     if (!content) {
       throw new Error("No content in OpenAI response");
     }

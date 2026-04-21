@@ -16,6 +16,7 @@ import { getCommentIdsForCluster } from "../utils/commentClusters";
 import { getAnthropicClient } from "../utils/aiClients";
 import { callWithFallback, AI_TIMEOUTS } from "../utils/aiResilience";
 import { AI_PRIORITY } from "../utils/aiProviderQueues";
+import { callAIProvider } from "../utils/aiModelRouter";
 
 const dynamoDBConfig: any = {
   region: Config.AWS_REGION || "us-east-1",
@@ -55,10 +56,6 @@ async function generateCollectiveStatement(
   topicName: string,
   commentsData: any
 ): Promise<any> {
-  if (!anthropic) {
-    throw new Error("Anthropic API key not configured");
-  }
-
   // Format comments data for the XML prompt
   const formattedComments = commentsData.map((comment: any) => ({
     comment_id: comment.comment_id,
@@ -146,11 +143,8 @@ You MUST respond with valid JSON that follows the exact schema above. Each claus
   try {
     const delphiModelConfig = await getModelConfig('delphi_report');
     const claudeModel = delphiModelConfig?.primaryModel || "claude-sonnet-4-20250514";
-    const response = await callWithFallback({
-      label: 'collective_statement',
-      primaryModel: claudeModel,
-      primaryProvider: 'anthropic',
-      primaryFn: async (model, _provider) => {
+    const callProvider = async (model: string, provider: string) => {
+      if (provider === 'anthropic') {
         if (!anthropic) {
           throw new Error("Anthropic API key not configured");
         }
@@ -170,7 +164,26 @@ You MUST respond with valid JSON that follows the exact schema above. Each claus
             },
           ],
         });
-      },
+      }
+
+      const result = await callAIProvider(model, provider, [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ], { maxTokens: 3000, temperature: 0.7 });
+
+      return {
+        content: [{ type: 'text' as const, text: result.content }],
+        usage: { input_tokens: result.inputTokens, output_tokens: result.outputTokens },
+      };
+    };
+    const response = await callWithFallback({
+      label: 'collective_statement',
+      primaryModel: claudeModel,
+      primaryProvider: delphiModelConfig?.primaryProvider ?? 'anthropic',
+      backupModel: delphiModelConfig?.backupModel ?? undefined,
+      backupProvider: delphiModelConfig?.backupProvider ?? undefined,
+      primaryFn: async (model, provider) => callProvider(model, provider),
+      backupFn: async (model, provider) => callProvider(model, provider),
       timeout: AI_TIMEOUTS.REPORT,
       priority: AI_PRIORITY.BACKGROUND,
     });
@@ -182,7 +195,7 @@ You MUST respond with valid JSON that follows the exact schema above. Each claus
       await logAiUsage({
         use_case: 'delphi_report',
         model: claudeModel,
-        provider: 'anthropic',
+        provider: delphiModelConfig?.primaryProvider ?? 'anthropic',
         input_tokens: (response as any).usage?.input_tokens || 0,
         output_tokens: (response as any).usage?.output_tokens || 0,
         deliberation_id: deliberationId ?? undefined,

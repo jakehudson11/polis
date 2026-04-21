@@ -1,9 +1,9 @@
 import Config from "../config";
 import logger from "../utils/logger";
 import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
-import { getOpenAIClient } from "../utils/aiClients";
 import { callWithFallback, AI_TIMEOUTS } from "../utils/aiResilience";
 import { AI_PRIORITY } from "../utils/aiProviderQueues";
+import { callAIProvider } from "../utils/aiModelRouter";
 
 interface SeedCommentGenerationRequest {
   context: string;
@@ -92,24 +92,23 @@ ${context}`;
 
       const modelConfig = await getModelConfig('seed_comment_generator');
       const model = process.env.OPENAI_MODEL || modelConfig?.primaryModel || "gpt-4o-mini";
+      const primaryProvider = modelConfig?.primaryProvider ?? 'openai';
 
       const response = await callWithFallback({
         label: 'seed_comments_service',
         primaryModel: model,
-        primaryProvider: 'openai',
-        primaryFn: async (m, _p) => {
-          const client = getOpenAIClient();
-          return client.chat.completions.create({
-            model: m,
-            messages: [
-              {
-                role: "user",
-                content: prompt,
-              },
-            ],
-            temperature: 0.7,
-            max_tokens: 4000,
-          });
+        primaryProvider,
+        backupModel: modelConfig?.backupModel ?? undefined,
+        backupProvider: modelConfig?.backupProvider ?? undefined,
+        primaryFn: async (model, provider) => {
+          return callAIProvider(model, provider, [
+            { role: 'user', content: prompt },
+          ], { maxTokens: 4000, temperature: 0.7 });
+        },
+        backupFn: async (model, provider) => {
+          return callAIProvider(model, provider, [
+            { role: 'user', content: prompt },
+          ], { maxTokens: 4000, temperature: 0.7 });
         },
         timeout: AI_TIMEOUTS.STANDARD,
         priority: AI_PRIORITY.BACKGROUND,
@@ -123,16 +122,16 @@ ${context}`;
           await logAiUsage({
             use_case: 'seed_comment_generator',
             model,
-            provider: 'openai',
-            input_tokens: response.usage?.prompt_tokens || 0,
-            output_tokens: response.usage?.completion_tokens || 0,
+            provider: modelConfig?.primaryProvider ?? 'openai',
+            input_tokens: response.inputTokens,
+            output_tokens: response.outputTokens,
             deliberation_id: deliberationId ?? undefined,
             admin_user_id: adminUserId ?? undefined,
           });
         })().catch(() => {});
       }
 
-      const content = response.choices[0]?.message?.content || "";
+      const content = response.content || "";
       if (!content.trim()) {
         throw new Error("Empty response from OpenAI API");
       }

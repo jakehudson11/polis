@@ -989,8 +989,15 @@ export async function handle_GET_reportNarrative(
     return;
   }
 
-  const modelParam = req.query.model || "openai";
-  const modelVersionParam = req.query.modelVersion;
+  const delphiModelConfig = await getModelConfig('delphi_report');
+  const providerToModelParam = (provider: string): string => {
+    if (provider === 'google') return 'gemini';
+    if (provider === 'anthropic') return 'claude';
+    return 'openai';
+  };
+  const modelParam = req.query.model ||
+    (delphiModelConfig?.primaryProvider ? providerToModelParam(delphiModelConfig.primaryProvider) : 'openai');
+  const modelVersionParam = req.query.modelVersion || delphiModelConfig?.primaryModel;
 
   res.writeHead(200, {
     "Content-Type": "text/plain; charset=utf-8",
