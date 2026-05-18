@@ -251,7 +251,7 @@ function _getCommentsForModerationList(o: {
         }
         if (!include_voting_patterns) {
           let query =
-            "select * from comments where comments.zid = ($1)" + modClause;
+            "select * from comments where comments.zid = ($1) and comments.is_seed = false" + modClause;
 
           // Add pagination if provided
           if (!_.isUndefined(o.limit)) {
@@ -270,7 +270,7 @@ function _getCommentsForModerationList(o: {
         }
 
         let votingQuery =
-          "select * from (select tid, vote, count(*) from votes_latest_unique where zid = ($1) group by tid, vote) as foo full outer join comments on foo.tid = comments.tid where comments.zid = ($1)" +
+          "select * from (select tid, vote, count(*) from votes_latest_unique where zid = ($1) group by tid, vote) as foo full outer join comments on foo.tid = comments.tid where comments.zid = ($1) and comments.is_seed = false" +
           modClause;
 
         // Add pagination if provided

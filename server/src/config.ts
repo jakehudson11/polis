@@ -72,6 +72,8 @@ export default {
   },
 
   agoraDbUrl: process.env.AGORA_DATABASE_URL || '',
+  agoraBackendUrl: process.env.AGORA_BACKEND_URL || 'http://agora-backend:3000',
+  polisInternalProxySecret: process.env.POLIS_INTERNAL_PROXY_SECRET || '',
 
   adminEmailDataExport: process.env.ADMIN_EMAIL_DATA_EXPORT as string,
   adminEmailDataExportTest: process.env.ADMIN_EMAIL_DATA_EXPORT_TEST as string,

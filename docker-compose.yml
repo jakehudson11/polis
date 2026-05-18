@@ -28,6 +28,7 @@ services:
       
       # Agora cross-platform DB (for AI usage logging)
       - AGORA_DATABASE_URL=${AGORA_DATABASE_URL:-postgresql://agora:agora@agora-postgres:5432/agora}
+      - AGORA_BACKEND_URL=${AGORA_BACKEND_URL:-http://agora-backend:3000}
       
       # JWT Configuration
       - POLIS_JWT_SECRET=${POLIS_JWT_SECRET}

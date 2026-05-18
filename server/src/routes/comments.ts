@@ -13,7 +13,6 @@ import { getZinvite } from "../utils/zinvite";
 import { isModerator, polisTypes } from "../utils/common";
 import { MPromise } from "../utils/metered";
 import { votesPost } from "./votes";
-import analyzeComment from "../utils/moderation";
 import Config from "../config";
 import logger from "../utils/logger";
 import pg from "../db/pg-query";
@@ -97,8 +96,10 @@ const managementClient = new ManagementClient({
 });
 
 async function commentExists(zid: number, txt: string): Promise<boolean> {
+  // Only count active rows — deactivated/soft-deleted comments should
+  // not block re-adding identical text.
   const rows = (await pg.queryP(
-    "select zid from comments where zid = ($1) and txt = ($2);",
+    "select zid from comments where zid = ($1) and txt = ($2) and active = true;",
     [zid, txt]
   )) as Array<{ zid: number }>;
   return Array.isArray(rows) && rows.length > 0;
@@ -308,39 +309,58 @@ function moderateCommentQuery(
 async function moderateComment(
   txt: string,
   conversation: any,
-  ip?: string | undefined
+  _ip?: string | undefined
 ): Promise<CommentModerationResult> {
   let active = true;
-  const classifications: string[] = [];
   let mod = 0;
+  const classifications: string[] = [];
 
-  // Run moderation checks in parallel
-  const [polisModResponse, bad] = await Promise.all([
-    analyzeComment(txt, conversation.topic, ip),
-    Promise.resolve(hasBadWords(txt)),
-  ]);
-
+  // Local profanity filter (kept — fast, no network)
+  const bad = hasBadWords(txt);
   if (bad && conversation.profanity_filter) {
     active = false;
-    classifications.push("bad");
+    classifications.push("profanity");
     logger.info("active=false because (bad && conv.profanity_filter)");
   }
 
-  const commentToxicityThreshold = 100;
-
-  const toxicityScore = Number(polisModResponse);
-
-  if (typeof toxicityScore === "number" && !isNaN(toxicityScore)) {
-    logger.debug(
-      `Polismod toxicity Score for comment "${txt}": ${toxicityScore}`
-    );
-
-    if (toxicityScore >= commentToxicityThreshold) {
+  // Delegate AI content moderation to Agora's centralized service.
+  try {
+    const agoraUrl = Config.agoraBackendUrl?.replace(/\/$/, "") || "";
+    if (!agoraUrl) {
+      logger.warn("AGORA_BACKEND_URL not configured; skipping AI moderation");
+      return { active, mod, classifications };
+    }
+    const resp = await fetch(`${agoraUrl}/api/v1/internal/moderate-comment`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-polis-internal-key": Config.polisInternalProxySecret || "",
+      },
+      body: JSON.stringify({ txt, deliberation_id: null }),
+    });
+    if (!resp.ok) {
+      logger.warn(`Agora moderation returned ${resp.status}; failing open`);
+      return { active, mod, classifications };
+    }
+    const data: any = await resp.json();
+    if (data?.moderation_unavailable) {
+      logger.info("Agora moderation unavailable; failing open");
+      return { active, mod, classifications };
+    }
+    if (data?.flagged === true) {
       active = false;
       mod = -1;
-      classifications.push("bad");
-      logger.info("active=false because (Toxicity)");
+      const reason =
+        typeof data.reason === "string" && data.reason.trim()
+          ? data.reason.trim()
+          : "ai_flagged";
+      classifications.push(reason);
+      logger.info(`active=false because (Agora AI flagged: ${reason})`);
     }
+  } catch (err) {
+    logger.warn(
+      "Agora moderation call failed; failing open: " + (err as any)?.message
+    );
   }
 
   return { active, mod, classifications };
@@ -443,7 +463,10 @@ async function handle_POST_comments(req: RequestWithP, res: any) {
       isModerator(zid, uid),
     ]);
 
-    if (!conversation.is_active) {
+    // Moderators may post seed comments while the conversation is inactive
+    // (e.g., during the admin setup phase before publish). Mirrors the
+    // direct-insert path used by the AI seed-comment generator.
+    if (!conversation.is_active && !(is_seed && is_moderator)) {
       failJson(res, 403, "polis_err_conversation_is_closed");
       return;
     }
@@ -457,20 +480,40 @@ async function handle_POST_comments(req: RequestWithP, res: any) {
     // 4. Moderate the comment
     let active = true;
     let mod = polisTypes.mod.unmoderated;
+    let mod_reason: string | null = null;
 
-    // Always auto-approve seed comments regardless of pro status
     if (is_seed || is_moderator) {
       mod = polisTypes.mod.ok;
       active = true;
-    } else if (await isProConvo(conversation.owner)) {
-      // Only apply pro moderation features to non-seed comments
-      const moderationResult = await moderateComment(txt, conversation, ip);
-      active = moderationResult.active;
-      mod = moderationResult.mod;
-    }
-
-    if (!conversation.strict_moderation && active) {
-      mod = polisTypes.mod.ok;
+    } else {
+      // Always run AI moderation on participant comments, regardless of pro/strict.
+      let moderationResult: { active: boolean; mod: number; classifications?: string[] } = {
+        active: true,
+        mod: polisTypes.mod.unmoderated,
+        classifications: [],
+      };
+      try {
+        moderationResult = await moderateComment(txt, conversation, ip);
+      } catch (err) {
+        // If AI moderation service is unavailable, fall back to "not flagged"
+        // so a moderation outage doesn't block participation.
+        console.error("moderateComment failed; defaulting to not-flagged:", err);
+      }
+      if (moderationResult.active === false) {
+        // AI flagged: route to admin review queue regardless of strict_moderation.
+        active = false;
+        mod = polisTypes.mod.unmoderated;
+        const classes = (moderationResult.classifications || []).filter(Boolean);
+        mod_reason = classes.length ? classes.join(", ") : "ai_flagged";
+      } else if (!conversation.strict_moderation) {
+        // Not flagged + non-strict → auto-approve.
+        mod = polisTypes.mod.ok;
+        active = true;
+      } else {
+        // Not flagged + strict → pending admin approval.
+        mod = polisTypes.mod.unmoderated;
+        active = true;
+      }
     }
 
     // 5. Detect language
@@ -482,8 +525,8 @@ async function handle_POST_comments(req: RequestWithP, res: any) {
     // 6. Insert the comment
     const insertedComment = await pg.queryP(
       `INSERT INTO COMMENTS
-      (pid, zid, txt, velocity, active, mod, uid, anon, is_seed, created, tid, lang, lang_confidence)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, default, null, $10, $11)
+      (pid, zid, txt, velocity, active, mod, uid, anon, is_seed, created, tid, lang, lang_confidence, mod_reason)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, default, null, $10, $11, $12)
       RETURNING *;`,
       [
         pid,
@@ -497,14 +540,17 @@ async function handle_POST_comments(req: RequestWithP, res: any) {
         is_seed || false,
         lang,
         lang_confidence,
+        mod_reason,
       ]
     );
 
     const comment = insertedComment[0];
     const tid = comment.tid;
 
-    // 7. Handle voting on the comment if specified
-    const shouldDefaultVote = req.p.is_seed && _.isUndefined(vote);
+    // 7. Handle voting on the comment if specified.
+    // Skip the seed auto-vote when posted by a moderator — matches the
+    // AI seed-comment generator's direct-insert path (which never votes).
+    const shouldDefaultVote = req.p.is_seed && _.isUndefined(vote) && !is_moderator;
     const finalVote = shouldDefaultVote ? 0 : vote;
 
     if (!_.isUndefined(finalVote)) {
