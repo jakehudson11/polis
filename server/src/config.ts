@@ -71,7 +71,6 @@ export default {
     return val;
   },
 
-  agoraDbUrl: process.env.AGORA_DATABASE_URL || '',
   agoraBackendUrl: process.env.AGORA_BACKEND_URL || 'http://agora-backend:3000',
   polisInternalProxySecret: process.env.POLIS_INTERNAL_PROXY_SECRET || '',
 
@@ -104,6 +103,15 @@ export default {
   dynamoDbEndpoint: process.env.DYNAMODB_ENDPOINT || null,
   emailTransportTypes: process.env.EMAIL_TRANSPORT_TYPES || null,
   geminiApiKey: process.env.GEMINI_API_KEY || null,
+
+  // DeepSeek AI provider
+  deepseekApiKey: process.env.DEEPSEEK_API_KEY || null,
+  deepseekBaseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
+
+  // Qwen (DashScope) AI provider
+  qwenApiKey: process.env.QWEN_API_KEY || process.env.DASHSCOPE_API_KEY || null,
+  qwenBaseUrl: process.env.QWEN_BASE_URL || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+
   jwksUri: process.env.JWKS_URI || null,
   logLevel: process.env.SERVER_LOG_LEVEL as string,
   logToFile: isTrue(process.env.SERVER_LOG_TO_FILE),

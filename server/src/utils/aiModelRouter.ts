@@ -1,4 +1,4 @@
-import { getOpenAIClient, getAnthropicClient, getGeminiClient } from './aiClients';
+import { getOpenAIClient, getAnthropicClient, getGeminiClient, getDeepSeekClient, getQwenClient } from './aiClients';
 
 export interface NormalizedAIResponse {
   content: string;
@@ -46,6 +46,36 @@ export async function callAIProvider(
       content: response.content[0]?.type === 'text' ? response.content[0].text : '',
       inputTokens: response.usage?.input_tokens ?? 0,
       outputTokens: response.usage?.output_tokens ?? 0,
+    };
+  }
+
+  if (provider === 'deepseek') {
+    const deepseek = getDeepSeekClient();
+    const completion = await deepseek.chat.completions.create({
+      model,
+      messages: messages as any,
+      max_completion_tokens: maxTokens,
+      temperature,
+    });
+    return {
+      content: completion.choices[0]?.message?.content ?? '',
+      inputTokens: completion.usage?.prompt_tokens ?? 0,
+      outputTokens: completion.usage?.completion_tokens ?? 0,
+    };
+  }
+
+  if (provider === 'qwen') {
+    const qwen = getQwenClient();
+    const completion = await qwen.chat.completions.create({
+      model,
+      messages: messages as any,
+      max_completion_tokens: maxTokens,
+      temperature,
+    });
+    return {
+      content: completion.choices[0]?.message?.content ?? '',
+      inputTokens: completion.usage?.prompt_tokens ?? 0,
+      outputTokens: completion.usage?.completion_tokens ?? 0,
     };
   }
 

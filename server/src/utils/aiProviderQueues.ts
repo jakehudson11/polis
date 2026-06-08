@@ -6,6 +6,8 @@ const PROVIDER_CONCURRENCY: Record<string, number> = {
   anthropic: 8,
   google: 10,
   perplexity: 3,
+  deepseek: 5,
+  qwen: 5,
 };
 
 export const AI_PRIORITY = {

@@ -1,4 +1,10 @@
-import { agoraQuery } from '../db/agora-pg';
+import pgQuery from '../db/pg-query';
+import Config from '../config';
+
+// ─── Config ────────────────────────────────────────────────
+
+const agoraBackendUrl = Config.agoraBackendUrl || process.env.AGORA_BACKEND_URL || 'http://agora-backend:3000';
+const polisInternalProxySecret = Config.polisInternalProxySecret || process.env.POLIS_INTERNAL_PROXY_SECRET || '';
 
 // ─── Types ─────────────────────────────────────────────────
 
@@ -22,60 +28,46 @@ interface ModelConfig {
 // ─── Public API ────────────────────────────────────────────
 
 /**
- * Insert a row into agora_ai_usage_log with auto-calculated cost.
- * Never throws — errors are logged to console.error.
+ * POST AI usage to Agora's internal API endpoint.
+ * Fire-and-forget — errors are logged to console.error, never throws.
  */
 export async function logAiUsage(params: LogAiUsageParams): Promise<void> {
   try {
     const { use_case, model, provider, input_tokens, output_tokens, deliberation_id, admin_user_id } = params;
 
-    // Look up pricing
-    const pricingResult = await agoraQuery(
-      `SELECT input_cost_per_million, output_cost_per_million
-       FROM agora_ai_model_pricing
-       WHERE model_name = $1 AND provider = $2
-       LIMIT 1`,
-      [model, provider],
-    );
-
-    let cost = 0;
-    if (pricingResult && pricingResult.rows.length > 0) {
-      const { input_cost_per_million, output_cost_per_million } = pricingResult.rows[0];
-      cost =
-        (input_tokens * Number(input_cost_per_million)) / 1_000_000 +
-        (output_tokens * Number(output_cost_per_million)) / 1_000_000;
-    } else {
-      console.warn(`[aiUsageLogger] no pricing found for model=${model} provider=${provider}, logging with cost=0`);
+    const response = await fetch(`${agoraBackendUrl}/api/v1/internal/ai-usage`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-polis-internal-key': polisInternalProxySecret,
+      },
+      body: JSON.stringify({ use_case, model, provider, input_tokens, output_tokens, deliberation_id, admin_user_id }),
+    });
+    if (!response.ok) {
+      console.error(`[aiUsageLogger] Agora returned ${response.status}: ${await response.text().catch(() => '')}`);
     }
-
-    await agoraQuery(
-      `INSERT INTO agora_ai_usage_log
-         (use_case, model, provider, input_tokens, output_tokens, cost, deliberation_id, admin_user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [use_case, model, provider, input_tokens, output_tokens, cost, deliberation_id ?? null, admin_user_id ?? null],
-    );
   } catch (error) {
     console.error('[aiUsageLogger] failed to log AI usage', error);
   }
 }
 
 /**
- * Get the model configuration for a given use-case key.
+ * Get the model configuration for a given use-case key from Polis's own database.
  * Returns null if no config exists. Never throws.
  */
 export async function getModelConfig(useCaseKey: string): Promise<ModelConfig | null> {
   try {
-    const result = await agoraQuery(
+    const rows = await pgQuery.queryP(
       `SELECT primary_model, primary_provider, backup_model, backup_provider
-       FROM agora_ai_use_case_config
+       FROM polis_ai_use_case_config
        WHERE use_case_key = $1
        LIMIT 1`,
       [useCaseKey],
     );
 
-    if (!result || result.rows.length === 0) return null;
+    if (!rows || rows.length === 0) return null;
 
-    const row = result.rows[0];
+    const row = rows[0];
     return {
       primaryModel: row.primary_model,
       primaryProvider: row.primary_provider,
@@ -90,20 +82,20 @@ export async function getModelConfig(useCaseKey: string): Promise<ModelConfig | 
 
 /**
  * Map a Polis zid to an Agora deliberation_id.
- * Returns the deliberation_id string or null. Never throws.
+ * Calls Agora's internal GET /api/v1/internal/deliberation-by-zid/:zid endpoint.
  */
 export async function mapConversationToDeliberation(zid: number): Promise<string | null> {
   try {
-    const result = await agoraQuery(
-      `SELECT deliberation_id
-       FROM agora_deliberations
-       WHERE polis_zid = $1
-       LIMIT 1`,
-      [zid],
+    const response = await fetch(
+      `${agoraBackendUrl}/api/v1/internal/deliberation-by-zid/${zid}`,
+      { headers: { 'x-polis-internal-key': polisInternalProxySecret } }
     );
-
-    if (!result || result.rows.length === 0) return null;
-    return result.rows[0].deliberation_id;
+    if (!response.ok) {
+      console.warn(`[aiUsageLogger] Agora returned ${response.status} for zid=${zid}`);
+      return null;
+    }
+    const data = await response.json();
+    return data.deliberation_id ?? null;
   } catch (error) {
     console.error('[aiUsageLogger] failed to map zid to deliberation', error);
     return null;
@@ -112,20 +104,20 @@ export async function mapConversationToDeliberation(zid: number): Promise<string
 
 /**
  * Look up the admin user who created a deliberation.
- * Returns the agora_auth_users id or null. Never throws.
+ * Calls Agora's internal GET /api/v1/internal/deliberations/:deliberationId/admin endpoint.
  */
 export async function getAdminForDeliberation(deliberationId: string): Promise<number | null> {
   try {
-    const result = await agoraQuery(
-      `SELECT created_by_agora_user_id
-       FROM agora_deliberations
-       WHERE deliberation_id = $1
-       LIMIT 1`,
-      [deliberationId],
+    const response = await fetch(
+      `${agoraBackendUrl}/api/v1/internal/deliberations/${encodeURIComponent(deliberationId)}/admin`,
+      { headers: { 'x-polis-internal-key': polisInternalProxySecret } }
     );
-
-    if (!result || result.rows.length === 0) return null;
-    return result.rows[0].created_by_agora_user_id;
+    if (!response.ok) {
+      console.warn(`[aiUsageLogger] Agora returned ${response.status} for deliberation=${deliberationId}`);
+      return null;
+    }
+    const data = await response.json();
+    return data.admin_user_id ?? null;
   } catch (error) {
     console.error('[aiUsageLogger] failed to get admin for deliberation', error);
     return null;

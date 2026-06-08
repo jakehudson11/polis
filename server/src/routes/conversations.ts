@@ -1371,7 +1371,12 @@ function handle_GET_internal_conversationZid(
     return;
   }
 
-  const conversation_id = req.p.conversation_id;
+  const conversation_id = (req.query as any)?.conversation_id;
+  if (!conversation_id || typeof conversation_id !== 'string') {
+    failJson(res, 400, "polis_err_param_missing_conversation_id");
+    return;
+  }
+
   getZidFromConversationId(conversation_id)
     .then((zid: number) => {
       res.json({ zid, conversation_id });

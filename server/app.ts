@@ -96,6 +96,7 @@ import {
   handle_GET_conversationStats,
   handle_GET_iim_conversation,
   handle_GET_iip_conversation,
+  handle_GET_internal_conversationZid,
   handle_POST_conversation_close,
   handle_POST_conversation_reopen,
   handle_POST_conversations,
@@ -212,6 +213,17 @@ import {
   handle_GET_treevite_invites_csv,
   handle_GET_treevite_myInvites_csv,
 } from "./src/invites/treevites";
+
+import {
+  handle_GET_ai_config_models,
+  handle_POST_ai_config_models,
+  handle_PUT_ai_config_models,
+  handle_DELETE_ai_config_models,
+  handle_GET_ai_config_use_cases,
+  handle_PUT_ai_config_use_cases,
+  handle_POST_ai_config_models_test,
+  handle_POST_ai_config_models_sync_pricing,
+} from "./src/routes/aiConfig";
 
 import {
   attachAuthToken,
@@ -343,6 +355,17 @@ helpersInitialized.then(
     app.get("/api/v3/ping", function (_req, res) {
       res.status(200).json({ status: "ok" });
     });
+
+    // AI Config (internal)
+    app.get("/api/v3/ai-config/models", handle_GET_ai_config_models);
+    app.post("/api/v3/ai-config/models", moveToBody, handle_POST_ai_config_models);
+    app.put("/api/v3/ai-config/models/:id", moveToBody, handle_PUT_ai_config_models);
+    app.delete("/api/v3/ai-config/models/:id", handle_DELETE_ai_config_models);
+    app.get("/api/v3/ai-config/use-cases", handle_GET_ai_config_use_cases);
+    app.put("/api/v3/ai-config/use-cases/:useCaseKey", moveToBody, handle_PUT_ai_config_use_cases);
+    app.post("/api/v3/ai-config/models/test", moveToBody, handle_POST_ai_config_models_test);
+    app.post("/api/v3/ai-config/models/sync-pricing", moveToBody, handle_POST_ai_config_models_sync_pricing);
+    app.get("/api/v3/internal/conversationZid", handle_GET_internal_conversationZid);
 
     ////////////////////////////////////////////
     ////////////////////////////////////////////

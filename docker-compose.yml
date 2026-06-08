@@ -26,8 +26,6 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - DATABASE_SSL=${DATABASE_SSL:-false}
       
-      # Agora cross-platform DB (for AI usage logging)
-      - AGORA_DATABASE_URL=${AGORA_DATABASE_URL:-postgresql://agora:agora@agora-postgres:5432/agora}
       - AGORA_BACKEND_URL=${AGORA_BACKEND_URL:-http://agora-backend:3000}
       
       # JWT Configuration
@@ -42,6 +40,22 @@ services:
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL=${OPENAI_MODEL}
+      - GOOGLE_GEMINI_API_KEY=${GOOGLE_GEMINI_API_KEY}
+      # Additional AI providers
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      - QWEN_API_KEY=${QWEN_API_KEY}
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+      - QWEN_BASE_URL=${QWEN_BASE_URL:-https://dashscope-intl.aliyuncs.com/compatible-mode/v1}
+      # Polis AI model overrides (defaults baked into config.ts)
+      - POLIS_SEED_MODEL=${POLIS_SEED_MODEL:-}
+      - POLIS_SEED_PROVIDER=${POLIS_SEED_PROVIDER:-}
+      - POLIS_SEED_BACKUP_MODEL=${POLIS_SEED_BACKUP_MODEL:-}
+      - POLIS_SEED_BACKUP_PROVIDER=${POLIS_SEED_BACKUP_PROVIDER:-}
+      - POLIS_DELPHI_REPORT_MODEL=${POLIS_DELPHI_REPORT_MODEL:-}
+      - POLIS_DELPHI_REPORT_PROVIDER=${POLIS_DELPHI_REPORT_PROVIDER:-}
+      - POLIS_DELPHI_REPORT_BACKUP_MODEL=${POLIS_DELPHI_REPORT_BACKUP_MODEL:-}
+      - POLIS_DELPHI_REPORT_BACKUP_PROVIDER=${POLIS_DELPHI_REPORT_BACKUP_PROVIDER:-}
       
       # Internal Service URLs
       - MATH_SERVICE_URL=http://polis-math:8080
@@ -143,6 +157,7 @@ services:
       - LOG_LEVEL=${DELPHI_LOG_LEVEL:-INFO}
       - DELPHI_DEV_OR_PROD=${DELPHI_DEV_OR_PROD:-prod}
       - POLL_INTERVAL=${POLL_INTERVAL:-2}
+      - MAX_WORKERS=${MAX_WORKERS:-3}
       - INSTANCE_SIZE=${INSTANCE_SIZE:-default}
     networks:
       - polis-net

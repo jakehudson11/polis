@@ -35,6 +35,7 @@ import { handle_GET_xidReport } from "./src/routes/export";
 import {
   handle_GET_delphi,
   handle_GET_delphi_job_logs,
+  handle_GET_delphi_queue_position,
 } from "./src/routes/delphi";
 import { handle_GET_delphi_visualizations } from "./src/routes/delphi/visualizations";
 import { handle_POST_delphi_jobs } from "./src/routes/delphi/jobs";
@@ -217,6 +218,20 @@ import {
   handle_GET_treevite_invites_csv,
   handle_GET_treevite_myInvites_csv,
 } from "./src/invites/treevites";
+
+import {
+  handle_GET_ai_config_models,
+  handle_POST_ai_config_models,
+  handle_PUT_ai_config_models,
+  handle_DELETE_ai_config_models,
+  handle_GET_ai_config_use_cases,
+  handle_PUT_ai_config_use_cases,
+  handle_POST_ai_config_models_test,
+  handle_GET_ai_config_pricing_aliases,
+  handle_POST_ai_config_pricing_aliases,
+  handle_DELETE_ai_config_pricing_aliases,
+  handle_POST_ai_config_models_sync_pricing,
+} from "./src/routes/aiConfig";
 
 import {
   attachAuthToken,
@@ -852,8 +867,6 @@ helpersInitialized.then(
 
     app.get(
       "/api/v3/internal/conversationZid",
-      moveToBody,
-      need("conversation_id", getStringLimitLength(1, 1000), assignToP),
       handle_GET_internal_conversationZid
     );
 
@@ -1019,9 +1032,26 @@ helpersInitialized.then(
 
     app.get("/api/v3/testDatabase", moveToBody, handle_GET_testDatabase);
 
+    app.get("/api/v3/ai-config/models", handle_GET_ai_config_models);
+    app.post("/api/v3/ai-config/models", moveToBody, handle_POST_ai_config_models);
+    app.put("/api/v3/ai-config/models", moveToBody, handle_PUT_ai_config_models);
+    app.delete("/api/v3/ai-config/models", moveToBody, handle_DELETE_ai_config_models);
+
+    app.get("/api/v3/ai-config/use-cases", moveToBody, handle_GET_ai_config_use_cases);
+    app.put("/api/v3/ai-config/use-cases", moveToBody, handle_PUT_ai_config_use_cases);
+
+    app.post("/api/v3/ai-config/models/test", moveToBody, handle_POST_ai_config_models_test);
+    app.post("/api/v3/ai-config/models/sync-pricing", moveToBody, handle_POST_ai_config_models_sync_pricing);
+
+    app.get("/api/v3/ai-config/pricing-aliases", handle_GET_ai_config_pricing_aliases);
+    app.post("/api/v3/ai-config/pricing-aliases", moveToBody, handle_POST_ai_config_pricing_aliases);
+    app.delete("/api/v3/ai-config/pricing-aliases/:id", handle_DELETE_ai_config_pricing_aliases);
+
     app.get("/api/v3/delphi", moveToBody, handle_GET_delphi);
 
     app.get("/api/v3/delphi/logs", moveToBody, handle_GET_delphi_job_logs);
+
+    app.get("/api/v3/delphi/queue-position", moveToBody, handle_GET_delphi_queue_position);
 
     // Add POST endpoint for creating Delphi jobs
     app.post(
