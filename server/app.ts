@@ -223,6 +223,16 @@ import {
   handle_PUT_ai_config_use_cases,
   handle_POST_ai_config_models_test,
   handle_POST_ai_config_models_sync_pricing,
+  handle_GET_ai_config_pricing_aliases,
+  handle_POST_ai_config_pricing_aliases,
+  handle_DELETE_ai_config_pricing_aliases,
+  handle_GET_ai_config_providers,
+  handle_POST_ai_config_providers,
+  handle_PUT_ai_config_providers,
+  handle_DELETE_ai_config_providers,
+  handle_GET_ai_config_provider_api_keys,
+  handle_POST_ai_config_provider_api_keys,
+  handle_DELETE_ai_config_provider_api_keys,
 } from "./src/routes/aiConfig";
 
 import {
@@ -365,6 +375,16 @@ helpersInitialized.then(
     app.put("/api/v3/ai-config/use-cases/:useCaseKey", moveToBody, handle_PUT_ai_config_use_cases);
     app.post("/api/v3/ai-config/models/test", moveToBody, handle_POST_ai_config_models_test);
     app.post("/api/v3/ai-config/models/sync-pricing", moveToBody, handle_POST_ai_config_models_sync_pricing);
+    app.get("/api/v3/ai-config/pricing-aliases", handle_GET_ai_config_pricing_aliases);
+    app.post("/api/v3/ai-config/pricing-aliases", moveToBody, handle_POST_ai_config_pricing_aliases);
+    app.delete("/api/v3/ai-config/pricing-aliases/:id", handle_DELETE_ai_config_pricing_aliases);
+    app.get("/api/v3/ai-config/providers", handle_GET_ai_config_providers);
+    app.post("/api/v3/ai-config/providers", moveToBody, handle_POST_ai_config_providers);
+    app.put("/api/v3/ai-config/providers/:id", moveToBody, handle_PUT_ai_config_providers);
+    app.delete("/api/v3/ai-config/providers/:id", handle_DELETE_ai_config_providers);
+    app.get("/api/v3/ai-config/provider-api-keys", handle_GET_ai_config_provider_api_keys);
+    app.post("/api/v3/ai-config/provider-api-keys", moveToBody, handle_POST_ai_config_provider_api_keys);
+    app.delete("/api/v3/ai-config/provider-api-keys/:id", handle_DELETE_ai_config_provider_api_keys);
     app.get("/api/v3/internal/conversationZid", handle_GET_internal_conversationZid);
 
     ////////////////////////////////////////////

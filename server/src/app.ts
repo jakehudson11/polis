@@ -231,6 +231,13 @@ import {
   handle_POST_ai_config_pricing_aliases,
   handle_DELETE_ai_config_pricing_aliases,
   handle_POST_ai_config_models_sync_pricing,
+  handle_GET_ai_config_providers,
+  handle_POST_ai_config_providers,
+  handle_PUT_ai_config_providers,
+  handle_DELETE_ai_config_providers,
+  handle_GET_ai_config_provider_api_keys,
+  handle_POST_ai_config_provider_api_keys,
+  handle_DELETE_ai_config_provider_api_keys,
 } from "./src/routes/aiConfig";
 
 import {
@@ -1046,6 +1053,15 @@ helpersInitialized.then(
     app.get("/api/v3/ai-config/pricing-aliases", handle_GET_ai_config_pricing_aliases);
     app.post("/api/v3/ai-config/pricing-aliases", moveToBody, handle_POST_ai_config_pricing_aliases);
     app.delete("/api/v3/ai-config/pricing-aliases/:id", handle_DELETE_ai_config_pricing_aliases);
+
+    app.get("/api/v3/ai-config/providers", handle_GET_ai_config_providers);
+    app.post("/api/v3/ai-config/providers", moveToBody, handle_POST_ai_config_providers);
+    app.put("/api/v3/ai-config/providers/:id", moveToBody, handle_PUT_ai_config_providers);
+    app.delete("/api/v3/ai-config/providers/:id", handle_DELETE_ai_config_providers);
+
+    app.get("/api/v3/ai-config/provider-api-keys", handle_GET_ai_config_provider_api_keys);
+    app.post("/api/v3/ai-config/provider-api-keys", moveToBody, handle_POST_ai_config_provider_api_keys);
+    app.delete("/api/v3/ai-config/provider-api-keys/:id", handle_DELETE_ai_config_provider_api_keys);
 
     app.get("/api/v3/delphi", moveToBody, handle_GET_delphi);
 

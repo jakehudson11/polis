@@ -453,3 +453,185 @@ export async function handle_POST_ai_config_models_sync_pricing(req: Request, re
     res.status(500).json({ error: err.message || 'Sync failed' });
   }
 }
+
+// ── Providers CRUD ───────────────────────────────────────────────────────────
+
+const VALID_API_MODES = ['openai', 'anthropic', 'gemini'];
+
+export async function handle_GET_ai_config_providers(req: Request, res: Response): Promise<void> {
+  if (!checkInternalKey(req, res)) return;
+  try {
+    const rows = await pg.queryP(
+      "SELECT * FROM polis_ai_providers ORDER BY name"
+    );
+    res.json({ providers: rows });
+  } catch (err: any) {
+    logger.error("aiConfig GET /providers", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+export async function handle_POST_ai_config_providers(req: Request, res: Response): Promise<void> {
+  if (!checkInternalKey(req, res)) return;
+  try {
+    const { name, display_name, base_url, api_mode, custom_headers, is_active } = req.body;
+    if (!name) {
+      res.status(400).json({ error: "name is required" });
+      return;
+    }
+    if (api_mode && !VALID_API_MODES.includes(api_mode)) {
+      res.status(400).json({ error: `api_mode must be one of: ${VALID_API_MODES.join(', ')}` });
+      return;
+    }
+
+    const existing = await pg.queryP(
+      "SELECT id FROM polis_ai_providers WHERE name = $1",
+      [name]
+    );
+    if (existing.length > 0) {
+      res.status(409).json({ error: "Provider with this name already exists" });
+      return;
+    }
+
+    const rows = await pg.queryP(
+      `INSERT INTO polis_ai_providers (name, display_name, base_url, api_mode, custom_headers, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [name, display_name ?? null, base_url ?? null, api_mode ?? 'openai',
+       JSON.stringify(custom_headers ?? {}), is_active ?? true]
+    );
+    res.status(201).json({ provider: rows[0] });
+  } catch (err: any) {
+    logger.error("aiConfig POST /providers", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+export async function handle_PUT_ai_config_providers(req: Request, res: Response): Promise<void> {
+  if (!checkInternalKey(req, res)) return;
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+    const fields: string[] = [];
+    const values: any[] = [];
+    let idx = 1;
+
+    const settable: Record<string, (v: any) => any> = {
+      display_name: (v: any) => v,
+      base_url: (v: any) => v,
+      api_mode: (v: any) => v,
+      custom_headers: (v: any) => JSON.stringify(v),
+      is_active: (v: any) => v,
+    };
+
+    for (const [field, transform] of Object.entries(settable)) {
+      if (req.body[field] !== undefined) {
+        if (field === 'api_mode' && !VALID_API_MODES.includes(req.body[field])) {
+          res.status(400).json({ error: `api_mode must be one of: ${VALID_API_MODES.join(', ')}` });
+          return;
+        }
+        fields.push(`${field} = $${idx++}`);
+        values.push(transform(req.body[field]));
+      }
+    }
+
+    if (fields.length === 0) { res.status(400).json({ error: "No fields to update" }); return; }
+
+    fields.push(`updated_at = NOW()`);
+    values.push(id);
+
+    const rows = await pg.queryP(
+      `UPDATE polis_ai_providers SET ${fields.join(", ")} WHERE id = $${idx} RETURNING *`,
+      values
+    );
+    if (rows.length === 0) { res.status(404).json({ error: "Provider not found" }); return; }
+    res.json({ provider: rows[0] });
+  } catch (err: any) {
+    logger.error("aiConfig PUT /providers/:id", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+export async function handle_DELETE_ai_config_providers(req: Request, res: Response): Promise<void> {
+  if (!checkInternalKey(req, res)) return;
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+    const rows = await pg.queryP("DELETE FROM polis_ai_providers WHERE id = $1 RETURNING id", [id]);
+    if (rows.length === 0) { res.status(404).json({ error: "Provider not found" }); return; }
+    res.json({ success: true });
+  } catch (err: any) {
+    logger.error("aiConfig DELETE /providers/:id", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+// ── Provider API Keys CRUD ───────────────────────────────────────────────────
+
+function maskApiKey(key: string): string {
+  if (!key || key.length <= 8) return '****';
+  return key.substring(0, 4) + '...' + key.substring(key.length - 4);
+}
+
+export async function handle_GET_ai_config_provider_api_keys(req: Request, res: Response): Promise<void> {
+  if (!checkInternalKey(req, res)) return;
+  try {
+    const rows = await pg.queryP(
+      "SELECT id, provider, api_key, base_url, is_active, created_at, updated_at FROM polis_provider_api_keys ORDER BY provider"
+    );
+    const masked = rows.map((r: any) => ({
+      ...r,
+      api_key: maskApiKey(r.api_key),
+    }));
+    res.json({ keys: masked });
+  } catch (err: any) {
+    logger.error("aiConfig GET /provider-api-keys", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+export async function handle_POST_ai_config_provider_api_keys(req: Request, res: Response): Promise<void> {
+  if (!checkInternalKey(req, res)) return;
+  try {
+    const { provider, api_key, base_url } = req.body;
+    if (!provider || !api_key) {
+      res.status(400).json({ error: "provider and api_key are required" });
+      return;
+    }
+
+    // TODO: Add encryption layer for api_key storage (e.g. AES-256-GCM via ./utils/encryption)
+    const rows = await pg.queryP(
+      `INSERT INTO polis_provider_api_keys (provider, api_key, base_url)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (provider)
+       DO UPDATE SET api_key = EXCLUDED.api_key, base_url = EXCLUDED.base_url, updated_at = NOW()
+       RETURNING id, provider, api_key, base_url, is_active, created_at, updated_at`,
+      [provider, api_key, base_url ?? null]
+    );
+    const result = rows[0];
+    result.api_key = maskApiKey(result.api_key);
+    res.status(201).json({ key: result });
+  } catch (err: any) {
+    logger.error("aiConfig POST /provider-api-keys", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+export async function handle_DELETE_ai_config_provider_api_keys(req: Request, res: Response): Promise<void> {
+  if (!checkInternalKey(req, res)) return;
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+    // Soft-delete: deactivate rather than hard-delete to preserve referential integrity
+    const rows = await pg.queryP(
+      "UPDATE polis_provider_api_keys SET is_active = false, updated_at = NOW() WHERE id = $1 RETURNING id",
+      [id]
+    );
+    if (rows.length === 0) { res.status(404).json({ error: "API key not found" }); return; }
+    res.json({ success: true });
+  } catch (err: any) {
+    logger.error("aiConfig DELETE /provider-api-keys/:id", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}

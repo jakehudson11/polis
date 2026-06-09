@@ -20,6 +20,9 @@ services:
         NODE_ENV: production
     image: polis/server:latest
     container_name: polis-api
+    volumes:
+      - ./server/dist:/app/dist
+      - polis-server-logs:/app/logs
     restart: unless-stopped
     environment:
       # Database
@@ -91,8 +94,6 @@ services:
       - agora-net
     depends_on:
       - polis-postgres
-    volumes:
-      - polis-server-logs:/app/logs
 
   # Math Service (Clojure - PCA Clustering)
   polis-math:

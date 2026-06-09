@@ -1,4 +1,4 @@
-import { getOpenAIClient, getAnthropicClient, getGeminiClient, getDeepSeekClient, getQwenClient } from './aiClients';
+import { createClientForProvider } from './aiClients';
 
 export interface NormalizedAIResponse {
   content: string;
@@ -18,12 +18,13 @@ export async function callAIProvider(
   options: AIRouterOptions = {}
 ): Promise<NormalizedAIResponse> {
   const { maxTokens = 1024, temperature = 0.5 } = options;
+  const client = await createClientForProvider(provider);
 
   if (provider === 'google') {
     const systemMsg = messages.find(m => m.role === 'system')?.content ?? '';
     const userMsgs = messages.filter(m => m.role !== 'system');
     const prompt = [systemMsg, ...userMsgs.map(m => m.content)].filter(Boolean).join('\n\n');
-    const geminiModel = getGeminiClient().getGenerativeModel({ model });
+    const geminiModel = (client as any).getGenerativeModel({ model });
     const result = await geminiModel.generateContent(prompt);
     return {
       content: result.response.text(),
@@ -34,7 +35,7 @@ export async function callAIProvider(
 
   if (provider === 'anthropic') {
     const systemMsg = messages.find(m => m.role === 'system')?.content;
-    const anthropic = getAnthropicClient();
+    const anthropic = client as any;
     const response = await anthropic.messages.create({
       model,
       max_tokens: maxTokens,
@@ -49,39 +50,9 @@ export async function callAIProvider(
     };
   }
 
-  if (provider === 'deepseek') {
-    const deepseek = getDeepSeekClient();
-    const completion = await deepseek.chat.completions.create({
-      model,
-      messages: messages as any,
-      max_completion_tokens: maxTokens,
-      temperature,
-    });
-    return {
-      content: completion.choices[0]?.message?.content ?? '',
-      inputTokens: completion.usage?.prompt_tokens ?? 0,
-      outputTokens: completion.usage?.completion_tokens ?? 0,
-    };
-  }
-
-  if (provider === 'qwen') {
-    const qwen = getQwenClient();
-    const completion = await qwen.chat.completions.create({
-      model,
-      messages: messages as any,
-      max_completion_tokens: maxTokens,
-      temperature,
-    });
-    return {
-      content: completion.choices[0]?.message?.content ?? '',
-      inputTokens: completion.usage?.prompt_tokens ?? 0,
-      outputTokens: completion.usage?.completion_tokens ?? 0,
-    };
-  }
-
-  // OpenAI (default)
-  const openai = getOpenAIClient();
-  const completion = await openai.chat.completions.create({
+  // OpenAI-compatible (openai, deepseek, qwen, and unknown providers)
+  const openaiClient = client as any;
+  const completion = await openaiClient.chat.completions.create({
     model,
     messages: messages as any,
     max_completion_tokens: maxTokens,
