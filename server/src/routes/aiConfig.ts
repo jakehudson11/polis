@@ -516,8 +516,33 @@ export async function handle_POST_ai_config_models_sync_pricing(req: Request, re
             });
           }
 
-          // If alias set but aliased model not found — STOP, don't fall through
+          // If alias set but aliased model not found — set error and return candidates
           if (!modelKey) {
+            // Gather candidate registry keys: all keys whose base name starts with the alias
+            // or whose provider prefix matches the alias (like Agora's aliasCandidates)
+            const candidateKeys: string[] = [];
+            const normalizedAlias2 = aliasedName.trim().toLowerCase();
+            
+            // Candidate set 1: keys whose base name contains the alias
+            for (const k of Object.keys(data)) {
+              const parts = k.split('/').map(p => p.trim()).filter(Boolean);
+              const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
+              if (base.includes(normalizedAlias2) && !candidateKeys.includes(k)) {
+                candidateKeys.push(k);
+              }
+            }
+            
+            // Candidate set 2: keys where the provider prefix matches the alias
+            const prefix = normalizedAlias2 + '/';
+            for (const k of Object.keys(data)) {
+              if (k.toLowerCase().startsWith(prefix) && !candidateKeys.includes(k)) {
+                candidateKeys.push(k);
+              }
+            }
+            
+            // Sort: shorter keys first (more generic models), then alphabetical
+            candidateKeys.sort((a, b) => a.length - b.length || a.localeCompare(b));
+            
             await pg.queryP(
               `UPDATE polis_ai_model_pricing
                SET last_pricing_sync_at = NOW(),
@@ -533,7 +558,8 @@ export async function handle_POST_ai_config_models_sync_pricing(req: Request, re
             res.json({
               model: rows[0],
               synced: false,
-              note: `Alias set but aliased model "${aliasedName}" not found in Litellm registry.`
+              note: `Alias set but aliased model "${aliasedName}" not found in Litellm registry. Keeping manual pricing.`,
+              registryCandidates: candidateKeys.slice(0, 20) // Max 20 candidates
             });
             return;
           }
@@ -646,6 +672,161 @@ export async function handle_POST_ai_config_models_sync_pricing(req: Request, re
   } catch (err: any) {
     logger.error("sync-pricing error", err);
     res.status(500).json({ error: err.message || 'Sync failed' });
+  }
+}
+
+// ── Model pricing resolve endpoint ───────────────────────────────────────────
+
+export async function handle_POST_ai_config_models_resolve_pricing(req: Request, res: Response): Promise<void> {
+  if (!checkInternalKey(req, res)) return;
+  const { model_name, provider } = req.body;
+  if (!model_name || !provider) {
+    res.status(400).json({ error: "model_name and provider are required" });
+    return;
+  }
+
+  try {
+    // Load aliases from DB (composite-key aware)
+    const dbAliases = await loadPricingAliases();
+    const providerCompositeKey = `${model_name.trim().toLowerCase()}|${(provider || '').trim().toLowerCase()}`;
+    const bareModelKey = model_name.trim().toLowerCase();
+    const aliasedName = dbAliases[providerCompositeKey] ?? dbAliases[bareModelKey];
+
+    // Fetch Litellm registry
+    const url = `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      res.status(502).json({ error: "Failed to fetch Litellm registry" });
+      return;
+    }
+    const data = await response.json();
+    const allKeys = Object.keys(data);
+
+    // Determine the search name (aliased or original)
+    const searchName = aliasedName ? aliasedName.trim().toLowerCase() : model_name.trim().toLowerCase();
+    const normalizedSearch = searchName;
+    const normalizedProvider = (provider || '').trim().toLowerCase();
+
+    let modelKey: string | undefined;
+    let matchType = 'not_found';
+    const aliasCandidates: string[] = [];
+    const fuzzyEntries: any[] = [];
+    let foundEntry: any = null;
+
+    // Stage 1: exact match on search name
+    modelKey = allKeys.find(k => k.toLowerCase() === normalizedSearch);
+    if (modelKey) matchType = 'exact';
+
+    // Stage 2: provider-prefixed exact match
+    if (!modelKey) {
+      modelKey = allKeys.find(k => k.toLowerCase() === `${normalizedProvider}/${normalizedSearch}`);
+      if (modelKey) matchType = 'exact';
+    }
+
+    // Stage 3: base-name fallback (strip provider prefix from registry keys)
+    if (!modelKey) {
+      modelKey = allKeys.find(k => {
+        const parts = k.split('/').map(p => p.trim()).filter(Boolean);
+        const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
+        return base === normalizedSearch;
+      });
+      if (modelKey) matchType = 'provider_model_alias';
+    }
+
+    // Build aliasCandidates and fuzzyEntries (like Agora does)
+    // Gather all registry keys whose base name contains the search name
+    const candidateSeen = new Set<string>();
+    for (const k of allKeys) {
+      const lower = k.toLowerCase();
+      const parts = k.split('/').map(p => p.trim()).filter(Boolean);
+      const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
+      
+      // Alias candidate: base name matches or contains the search name
+      if ((base === normalizedSearch || base.includes(normalizedSearch) || lower.includes(normalizedSearch)) && !candidateSeen.has(k)) {
+        candidateSeen.add(k);
+        aliasCandidates.push(k);
+      }
+
+      // Fuzzy entry: same logic for richer data
+      if ((base === normalizedSearch || base.includes(normalizedSearch)) && !fuzzyEntries.some(e => e.sourceModelName === k)) {
+        const entry = data[k];
+        if (entry) {
+          fuzzyEntries.push({
+            sourceModelName: k,
+            provider: entry.litellm_provider || provider,
+            inputCostPerMillion: entry.input_cost_per_token ? entry.input_cost_per_token * 1_000_000 : null,
+            outputCostPerMillion: entry.output_cost_per_token ? entry.output_cost_per_token * 1_000_000 : null,
+            currency: 'USD',
+            mode: entry.mode || null,
+            inputBillingUnit: entry.mode === 'image_generation' ? 'image' : 'token',
+            outputBillingUnit: entry.mode === 'image_generation' ? 'image' : 'token',
+          });
+        }
+      }
+    }
+
+    // Also add provider-prefix candidates (keys starting with searchName/)
+    const prefix = normalizedSearch + '/';
+    for (const k of allKeys) {
+      if (k.toLowerCase().startsWith(prefix) && !candidateSeen.has(k)) {
+        candidateSeen.add(k);
+        aliasCandidates.push(k);
+        const entry = data[k];
+        if (entry && !fuzzyEntries.some(e => e.sourceModelName === k)) {
+          fuzzyEntries.push({
+            sourceModelName: k,
+            provider: entry.litellm_provider || provider,
+            inputCostPerMillion: entry.input_cost_per_token ? entry.input_cost_per_token * 1_000_000 : null,
+            outputCostPerMillion: entry.output_cost_per_token ? entry.output_cost_per_token * 1_000_000 : null,
+            currency: 'USD',
+            mode: entry.mode || null,
+            inputBillingUnit: entry.mode === 'image_generation' ? 'image' : 'token',
+            outputBillingUnit: entry.mode === 'image_generation' ? 'image' : 'token',
+          });
+        }
+      }
+    }
+
+    // Sort candidates: shorter keys first (more generic), then alphabetical
+    aliasCandidates.sort((a, b) => a.length - b.length || a.localeCompare(b));
+    fuzzyEntries.sort((a, b) => a.sourceModelName.length - b.sourceModelName.length || a.sourceModelName.localeCompare(b.sourceModelName));
+
+    if (modelKey) {
+      foundEntry = data[modelKey];
+    }
+
+    res.json({
+      ok: !!modelKey,
+      resolution: {
+        found: !!modelKey,
+        requestedModelName: model_name,
+        requestedProvider: provider,
+        matchType: matchType,
+        sourceModelName: modelKey || null,
+        provider: foundEntry?.litellm_provider || provider,
+        inputCostPerMillion: foundEntry?.input_cost_per_token ? foundEntry.input_cost_per_token * 1_000_000 : null,
+        outputCostPerMillion: foundEntry?.output_cost_per_token ? foundEntry.output_cost_per_token * 1_000_000 : null,
+        currency: 'USD',
+        contextWindowTokens: foundEntry?.max_input_tokens || null,
+        maxInputTokens: foundEntry?.max_input_tokens || null,
+        maxOutputTokens: foundEntry?.max_output_tokens || null,
+        tokenMetadata: {},
+        mode: foundEntry?.mode || null,
+        inputBillingUnit: foundEntry?.mode === 'image_generation' ? 'image' : 'token',
+        outputBillingUnit: foundEntry?.mode === 'image_generation' ? 'image' : 'token',
+        aliasCandidates: aliasCandidates.slice(0, 30),
+        fuzzyEntries: fuzzyEntries.slice(0, 30),
+        errors: modelKey ? [] : [{
+          code: 'pricing_not_found',
+          message: aliasedName 
+            ? `No registry pricing found for aliased model "${aliasedName}". Alias: ${model_name} → ${aliasedName}.`
+            : `No registry pricing found for "${model_name}" (${provider}).`
+        }],
+      }
+    });
+  } catch (err: any) {
+    logger.error("aiConfig POST /models/resolve-pricing", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 }
 

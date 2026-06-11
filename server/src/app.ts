@@ -231,6 +231,7 @@ import {
   handle_POST_ai_config_pricing_aliases,
   handle_DELETE_ai_config_pricing_aliases,
   handle_POST_ai_config_models_sync_pricing,
+  handle_POST_ai_config_models_resolve_pricing,
   handle_GET_ai_config_providers,
   handle_POST_ai_config_providers,
   handle_PUT_ai_config_providers,
@@ -1049,6 +1050,7 @@ helpersInitialized.then(
 
     app.post("/api/v3/ai-config/models/test", moveToBody, handle_POST_ai_config_models_test);
     app.post("/api/v3/ai-config/models/sync-pricing", moveToBody, handle_POST_ai_config_models_sync_pricing);
+    app.post("/api/v3/ai-config/models/resolve-pricing", moveToBody, handle_POST_ai_config_models_resolve_pricing);
 
     app.get("/api/v3/ai-config/pricing-aliases", handle_GET_ai_config_pricing_aliases);
     app.post("/api/v3/ai-config/pricing-aliases", moveToBody, handle_POST_ai_config_pricing_aliases);
