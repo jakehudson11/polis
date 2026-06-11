@@ -12,9 +12,16 @@ async function loadPricingAliases(): Promise<Record<string, string>> {
     );
     const aliases: Record<string, string> = {};
     for (const row of rows) {
-      const key = (row.model_name || '').trim().toLowerCase();
-      if (key && row.aliased_model_name?.trim()) {
-        aliases[key] = row.aliased_model_name.trim();
+      const modelKey = (row.model_name || '').trim().toLowerCase();
+      const providerKey = (row.provider || '').trim().toLowerCase();
+      const compositeKey = `${modelKey}|${providerKey}`;
+      const name = row.aliased_model_name?.trim();
+      if (modelKey && name) {
+        aliases[compositeKey] = name;
+        // Also set bare model_name key as fallback for backwards compat
+        if (!aliases[modelKey]) {
+          aliases[modelKey] = name;
+        }
       }
     }
     return aliases;
@@ -35,104 +42,6 @@ function checkInternalKey(req: Request, res: Response): boolean {
   return true;
 }
 
-// ── Shared pricing resolution helper ─────────────────────────────────────────
-
-interface ResolvedPricing {
-  inputCost: number;
-  outputCost: number;
-  modality: string;
-  billingUnit: string;
-}
-
-async function resolvePricingFromRegistry(
-  modelName: string,
-  provider: string,
-): Promise<ResolvedPricing | null> {
-  try {
-    const url = `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`;
-    const response = await fetch(url);
-    if (!response.ok) return null;
-    const data = await response.json();
-
-    const dbAliases = await loadPricingAliases();
-    const aliasedName = dbAliases[modelName.trim().toLowerCase()];
-
-    let modelKey: string | undefined;
-
-    // Stage 1: exact match on model name
-    modelKey = Object.keys(data).find(k => k.toLowerCase() === modelName.toLowerCase());
-    // Stage 2: provider-prefixed exact match
-    if (!modelKey) {
-      modelKey = Object.keys(data).find(k => k.toLowerCase() === `${provider}/${modelName}`.toLowerCase());
-    }
-    // Stage 3: DB alias lookup
-    if (!modelKey && aliasedName) {
-      modelKey = Object.keys(data).find(k => k.toLowerCase() === aliasedName.toLowerCase());
-    }
-    // Stage 4: smart base-name fallback
-    if (!modelKey) {
-      const normalized = modelName.trim().toLowerCase();
-      modelKey = Object.keys(data).find(k => {
-        const parts = k.split('/').map(p => p.trim()).filter(Boolean);
-        const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
-        return base === normalized;
-      });
-    }
-    // Stage 5: aliased name base-name fallback
-    if (!modelKey && aliasedName) {
-      const normalizedAlias = aliasedName.trim().toLowerCase();
-      modelKey = Object.keys(data).find(k => {
-        const parts = k.split('/').map(p => p.trim()).filter(Boolean);
-        const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
-        return base === normalizedAlias;
-      });
-    }
-
-    if (!modelKey) return null;
-    const entry = data[modelKey];
-    if (!entry) return null;
-
-    // Litellm stores costs per single unit; our DB uses per-1M
-    const inputCost = entry.input_cost_per_image
-      ? entry.input_cost_per_image
-      : entry.input_cost_per_image_token
-        ? entry.input_cost_per_image_token * 1_000_000
-        : entry.input_cost_per_token
-          ? entry.input_cost_per_token * 1_000_000
-          : entry.input_cost_per_character
-            ? entry.input_cost_per_character * 1_000_000
-            : null;
-
-    const outputCost = entry.output_cost_per_image
-      ? entry.output_cost_per_image
-      : entry.output_cost_per_image_token
-        ? entry.output_cost_per_image_token * 1_000_000
-        : entry.output_cost_per_token
-          ? entry.output_cost_per_token * 1_000_000
-          : entry.output_cost_per_character
-            ? entry.output_cost_per_character * 1_000_000
-            : null;
-
-    if (inputCost === null && outputCost === null) return null;
-
-    const resolvedModality = entry.mode === 'image_generation' ? 'img'
-      : entry.mode === 'audio_speech' ? 'tts'
-      : 'llm';
-    const resolvedBillingUnit = entry.mode === 'image_generation' ? 'image'
-      : entry.mode === 'audio_speech' ? 'character'
-      : 'token';
-
-    return {
-      inputCost: inputCost ?? 0,
-      outputCost: outputCost ?? 0,
-      modality: resolvedModality,
-      billingUnit: resolvedBillingUnit,
-    };
-  } catch {
-    return null;
-  }
-}
-
 // ── Model pricing handlers ───────────────────────────────────────────────────
 
 export async function handle_GET_ai_config_models(req: Request, res: Response): Promise<void> {
@@ -145,6 +54,95 @@ export async function handle_GET_ai_config_models(req: Request, res: Response): 
   } catch (err: any) {
     logger.error("aiConfig GET /models", err);
     res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+/**
+ * Resolves pricing for a model from the Litellm public registry.
+ * Mirrors the lookup logic in handle_POST_ai_config_models_sync_pricing.
+ * Returns { inputCost, outputCost, modality, billingUnit } or null if not found.
+ */
+async function resolvePricingFromRegistry(
+  model_name: string,
+  provider: string
+): Promise<{ inputCost: number; outputCost: number; modality: string; billingUnit: string } | null> {
+  try {
+    const url = `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`;
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const data = await response.json();
+
+    // Load aliases
+    const dbAliases = await loadPricingAliases();
+    const providerCompositeKey = `${model_name.trim().toLowerCase()}|${(provider || '').trim().toLowerCase()}`;
+    const bareModelKey = model_name.trim().toLowerCase();
+    const aliasedName = dbAliases[providerCompositeKey] ?? dbAliases[bareModelKey];
+
+    // Determine the name to search for
+    const searchName = aliasedName ? aliasedName.trim().toLowerCase() : model_name.trim().toLowerCase();
+
+    let modelKey: string | undefined;
+
+    // Stage 1: exact match
+    modelKey = Object.keys(data).find(k => k.toLowerCase() === searchName);
+
+    // Stage 2: provider-prefixed exact match
+    if (!modelKey) {
+      modelKey = Object.keys(data).find(k => k.toLowerCase() === `${provider}/${searchName}`.toLowerCase());
+    }
+
+    // Stage 3: base-name fallback
+    if (!modelKey) {
+      modelKey = Object.keys(data).find(k => {
+        const parts = k.split('/').map((p: string) => p.trim()).filter(Boolean);
+        const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
+        return base === searchName;
+      });
+    }
+
+    if (!modelKey) return null;
+
+    const entry = data[modelKey];
+    if (!entry) return null;
+
+    // Pricing: image > character > token
+    const inputCost = entry.input_cost_per_image
+      ? entry.input_cost_per_image
+      : entry.input_cost_per_image_token
+        ? entry.input_cost_per_image_token * 1_000_000
+        : entry.input_cost_per_token
+          ? entry.input_cost_per_token * 1_000_000
+          : entry.input_cost_per_character
+            ? entry.input_cost_per_character * 1_000_000
+            : null;
+    const outputCost = entry.output_cost_per_image
+      ? entry.output_cost_per_image
+      : entry.output_cost_per_image_token
+        ? entry.output_cost_per_image_token * 1_000_000
+        : entry.output_cost_per_token
+          ? entry.output_cost_per_token * 1_000_000
+          : entry.output_cost_per_character
+            ? entry.output_cost_per_character * 1_000_000
+            : null;
+
+    if (inputCost === null && outputCost === null) return null;
+
+    // Detect modality and billing unit
+    const registryModality = entry.mode === 'image_generation' ? 'img'
+      : entry.mode === 'audio_speech' ? 'tts'
+      : 'llm';
+    const registryBillingUnit = entry.mode === 'image_generation' ? 'image'
+      : entry.mode === 'audio_speech' ? 'character'
+      : 'token';
+
+    return {
+      inputCost: inputCost ?? 0,
+      outputCost: outputCost ?? 0,
+      modality: registryModality,
+      billingUnit: registryBillingUnit,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -491,41 +489,74 @@ export async function handle_POST_ai_config_models_sync_pricing(req: Request, re
         // Try to find the model in Litellm's registry
         // Stage 1: Load aliases from DB
         const dbAliases = await loadPricingAliases();
-        const aliasedName = dbAliases[model_name.trim().toLowerCase()];
+        const providerCompositeKey = `${model_name.trim().toLowerCase()}|${(provider || '').trim().toLowerCase()}`;
+        const bareModelKey = model_name.trim().toLowerCase();
+        const aliasedName = dbAliases[providerCompositeKey] ?? dbAliases[bareModelKey];
 
         let modelKey: string | undefined;
 
-        // Stage 1: exact match on model name
-        modelKey = Object.keys(data).find(k => k.toLowerCase() === model_name.toLowerCase());
-
-        // Stage 2: provider-prefixed exact match
-        if (!modelKey) {
-          modelKey = Object.keys(data).find(k => k.toLowerCase() === `${provider}/${model_name}`.toLowerCase());
-        }
-
-        // Stage 3: DB alias lookup
-        if (!modelKey && aliasedName) {
-          modelKey = Object.keys(data).find(k => k.toLowerCase() === aliasedName.toLowerCase());
-        }
-
-        // Stage 4: smart base-name fallback (strip provider prefix from registry keys)
-        if (!modelKey) {
-          const normalized = model_name.trim().toLowerCase();
-          modelKey = Object.keys(data).find(k => {
-            const parts = k.split('/').map(p => p.trim()).filter(Boolean);
-            const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
-            return base === normalized;
-          });
-        }
-
-        // Stage 5: aliased name base-name fallback
-        if (!modelKey && aliasedName) {
+        if (aliasedName) {
+          // Alias is set — search ONLY the aliased name, never the original
           const normalizedAlias = aliasedName.trim().toLowerCase();
-          modelKey = Object.keys(data).find(k => {
-            const parts = k.split('/').map(p => p.trim()).filter(Boolean);
-            const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
-            return base === normalizedAlias;
-          });
+
+          // Stage A1: exact match on aliased model name
+          modelKey = Object.keys(data).find(k => k.toLowerCase() === normalizedAlias);
+
+          // Stage A2: provider-prefixed exact match on aliased model name
+          if (!modelKey) {
+            modelKey = Object.keys(data).find(k => k.toLowerCase() === `${provider}/${normalizedAlias}`.toLowerCase());
+          }
+
+          // Stage A3: base-name fallback for aliased model name
+          if (!modelKey) {
+            modelKey = Object.keys(data).find(k => {
+              const parts = k.split('/').map(p => p.trim()).filter(Boolean);
+              const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
+              return base === normalizedAlias;
+            });
+          }
+
+          // If alias set but aliased model not found — STOP, don't fall through
+          if (!modelKey) {
+            await pg.queryP(
+              `UPDATE polis_ai_model_pricing
+               SET last_pricing_sync_at = NOW(),
+                   pricing_sync_error = $1,
+                   auto_update_enabled = false
+               WHERE model_name = $2 AND provider = $3`,
+              [`Alias set but aliased model "${aliasedName}" not found in Litellm registry.`, model_name, provider]
+            );
+            const rows = await pg.queryP(
+              "SELECT * FROM polis_ai_model_pricing WHERE model_name = $1 AND provider = $2 LIMIT 1",
+              [model_name, provider]
+            );
+            res.json({
+              model: rows[0],
+              synced: false,
+              note: `Alias set but aliased model "${aliasedName}" not found in Litellm registry.`
+            });
+            return;
+          }
+        } else {
+          // No alias — search original model name
+          const normalized = model_name.trim().toLowerCase();
+
+          // Stage B1: exact match on model name
+          modelKey = Object.keys(data).find(k => k.toLowerCase() === normalized);
+
+          // Stage B2: provider-prefixed exact match
+          if (!modelKey) {
+            modelKey = Object.keys(data).find(k => k.toLowerCase() === `${provider}/${normalized}`.toLowerCase());
+          }
+
+          // Stage B3: base-name fallback
+          if (!modelKey) {
+            modelKey = Object.keys(data).find(k => {
+              const parts = k.split('/').map(p => p.trim()).filter(Boolean);
+              const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
+              return base === normalized;
+            });
+          }
         }
         if (modelKey) {
           const entry = data[modelKey];
