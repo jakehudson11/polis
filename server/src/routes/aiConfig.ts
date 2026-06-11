@@ -3,6 +3,7 @@ import Config from "../config";
 import pg from "../db/pg-query";
 import logger from "../utils/logger";
 import { callAIProvider } from "../utils/aiModelRouter";
+import { encrypt, decrypt } from "../utils/encryption";
 
 async function loadPricingAliases(): Promise<Record<string, string>> {
   try {
@@ -34,6 +35,104 @@ function checkInternalKey(req: Request, res: Response): boolean {
   return true;
 }
 
+// ── Shared pricing resolution helper ─────────────────────────────────────────
+
+interface ResolvedPricing {
+  inputCost: number;
+  outputCost: number;
+  modality: string;
+  billingUnit: string;
+}
+
+async function resolvePricingFromRegistry(
+  modelName: string,
+  provider: string,
+): Promise<ResolvedPricing | null> {
+  try {
+    const url = `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`;
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const data = await response.json();
+
+    const dbAliases = await loadPricingAliases();
+    const aliasedName = dbAliases[modelName.trim().toLowerCase()];
+
+    let modelKey: string | undefined;
+
+    // Stage 1: exact match on model name
+    modelKey = Object.keys(data).find(k => k.toLowerCase() === modelName.toLowerCase());
+    // Stage 2: provider-prefixed exact match
+    if (!modelKey) {
+      modelKey = Object.keys(data).find(k => k.toLowerCase() === `${provider}/${modelName}`.toLowerCase());
+    }
+    // Stage 3: DB alias lookup
+    if (!modelKey && aliasedName) {
+      modelKey = Object.keys(data).find(k => k.toLowerCase() === aliasedName.toLowerCase());
+    }
+    // Stage 4: smart base-name fallback
+    if (!modelKey) {
+      const normalized = modelName.trim().toLowerCase();
+      modelKey = Object.keys(data).find(k => {
+        const parts = k.split('/').map(p => p.trim()).filter(Boolean);
+        const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
+        return base === normalized;
+      });
+    }
+    // Stage 5: aliased name base-name fallback
+    if (!modelKey && aliasedName) {
+      const normalizedAlias = aliasedName.trim().toLowerCase();
+      modelKey = Object.keys(data).find(k => {
+        const parts = k.split('/').map(p => p.trim()).filter(Boolean);
+        const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
+        return base === normalizedAlias;
+      });
+    }
+
+    if (!modelKey) return null;
+    const entry = data[modelKey];
+    if (!entry) return null;
+
+    // Litellm stores costs per single unit; our DB uses per-1M
+    const inputCost = entry.input_cost_per_image
+      ? entry.input_cost_per_image
+      : entry.input_cost_per_image_token
+        ? entry.input_cost_per_image_token * 1_000_000
+        : entry.input_cost_per_token
+          ? entry.input_cost_per_token * 1_000_000
+          : entry.input_cost_per_character
+            ? entry.input_cost_per_character * 1_000_000
+            : null;
+
+    const outputCost = entry.output_cost_per_image
+      ? entry.output_cost_per_image
+      : entry.output_cost_per_image_token
+        ? entry.output_cost_per_image_token * 1_000_000
+        : entry.output_cost_per_token
+          ? entry.output_cost_per_token * 1_000_000
+          : entry.output_cost_per_character
+            ? entry.output_cost_per_character * 1_000_000
+            : null;
+
+    if (inputCost === null && outputCost === null) return null;
+
+    const resolvedModality = entry.mode === 'image_generation' ? 'img'
+      : entry.mode === 'audio_speech' ? 'tts'
+      : 'llm';
+    const resolvedBillingUnit = entry.mode === 'image_generation' ? 'image'
+      : entry.mode === 'audio_speech' ? 'character'
+      : 'token';
+
+    return {
+      inputCost: inputCost ?? 0,
+      outputCost: outputCost ?? 0,
+      modality: resolvedModality,
+      billingUnit: resolvedBillingUnit,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ── Model pricing handlers ───────────────────────────────────────────────────
 
 export async function handle_GET_ai_config_models(req: Request, res: Response): Promise<void> {
@@ -52,7 +151,7 @@ export async function handle_GET_ai_config_models(req: Request, res: Response): 
 export async function handle_POST_ai_config_models(req: Request, res: Response): Promise<void> {
   if (!checkInternalKey(req, res)) return;
   try {
-    const { model_name, provider, input_cost_per_million, output_cost_per_million, modality, context_window_tokens, max_output_tokens } = req.body;
+    const { model_name, provider, input_cost_per_million, output_cost_per_million, modality, context_window_tokens, max_output_tokens, auto_update_enabled, fetch_pricing } = req.body;
     if (!model_name || !provider) {
       res.status(400).json({ error: "model_name and provider are required" });
       return;
@@ -66,11 +165,44 @@ export async function handle_POST_ai_config_models(req: Request, res: Response):
       return;
     }
     const rows = await pg.queryP(
-      `INSERT INTO polis_ai_model_pricing (model_name, provider, input_cost_per_million, output_cost_per_million, modality, context_window_tokens, max_output_tokens)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO polis_ai_model_pricing (model_name, provider, input_cost_per_million, output_cost_per_million, modality, context_window_tokens, max_output_tokens, auto_update_enabled)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [model_name, provider, input_cost_per_million ?? 0, output_cost_per_million ?? 0, modality ?? "llm", context_window_tokens ?? null, max_output_tokens ?? null]
+      [model_name, provider, input_cost_per_million ?? 0, output_cost_per_million ?? 0, modality ?? "llm", context_window_tokens ?? null, max_output_tokens ?? null, auto_update_enabled ?? false]
     );
+
+    // If fetch_pricing requested, resolve pricing from Litellm registry immediately
+    if (fetch_pricing) {
+      try {
+        const resolved = await resolvePricingFromRegistry(model_name, provider);
+        if (resolved) {
+          await pg.queryP(
+            `UPDATE polis_ai_model_pricing
+             SET input_cost_per_million = $1, output_cost_per_million = $2,
+                 modality = $3, billing_unit = $4,
+                 last_pricing_sync_at = NOW(), pricing_sync_error = NULL,
+                 auto_update_enabled = true
+             WHERE id = $5`,
+            [resolved.inputCost, resolved.outputCost, resolved.modality, resolved.billingUnit, rows[0].id]
+          );
+          rows[0].input_cost_per_million = resolved.inputCost;
+          rows[0].output_cost_per_million = resolved.outputCost;
+          rows[0].modality = resolved.modality;
+          rows[0].billing_unit = resolved.billingUnit;
+          rows[0].auto_update_enabled = true;
+        } else {
+          await pg.queryP(
+            `UPDATE polis_ai_model_pricing
+             SET last_pricing_sync_at = NOW(), pricing_sync_error = $1,
+                 auto_update_enabled = false
+             WHERE id = $2`,
+            ['Model not found in Litellm registry. Keeping manual pricing.', rows[0].id]
+          );
+          rows[0].auto_update_enabled = false;
+        }
+      } catch { /* non-fatal — model still created */ }
+    }
+
     res.status(201).json({ model: rows[0] });
   } catch (err: any) {
     logger.error("aiConfig POST /models", err);
@@ -87,7 +219,7 @@ export async function handle_PUT_ai_config_models(req: Request, res: Response): 
     const fields: string[] = [];
     const values: any[] = [];
     let idx = 1;
-    const settable = ["model_name", "provider", "input_cost_per_million", "output_cost_per_million", "modality", "context_window_tokens", "max_output_tokens"];
+    const settable = ["model_name", "provider", "input_cost_per_million", "output_cost_per_million", "modality", "context_window_tokens", "max_output_tokens", "auto_update_enabled"];
     for (const field of settable) {
       if (req.body[field] !== undefined) {
         fields.push(`${field} = $${idx++}`);
@@ -116,8 +248,38 @@ export async function handle_DELETE_ai_config_models(req: Request, res: Response
   try {
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
-    const rows = await pg.queryP("DELETE FROM polis_ai_model_pricing WHERE id = $1 RETURNING id", [id]);
-    if (rows.length === 0) { res.status(404).json({ error: "Model not found" }); return; }
+
+    // Look up model by ID to get model_name and provider
+    const modelRows = await pg.queryP(
+      "SELECT model_name, provider FROM polis_ai_model_pricing WHERE id = $1",
+      [id]
+    );
+    if (modelRows.length === 0) {
+      res.status(404).json({ error: "Model not found" });
+      return;
+    }
+
+    const { model_name, provider } = modelRows[0];
+
+    // Check if any use cases reference this model
+    const refRows = await pg.queryP(
+      `SELECT use_case_key FROM polis_ai_use_case_config
+       WHERE (primary_model = $1 AND primary_provider = $2)
+          OR (backup_model = $1 AND backup_provider = $2)`,
+      [model_name, provider]
+    );
+
+    if (refRows.length > 0) {
+      const useCases = refRows.map((r: any) => r.use_case_key);
+      res.status(409).json({
+        error: "Model is referenced by use cases and cannot be deleted",
+        use_cases: useCases,
+      });
+      return;
+    }
+
+    // No references — proceed with delete
+    await pg.queryP("DELETE FROM polis_ai_model_pricing WHERE id = $1", [id]);
     res.json({ success: true });
   } catch (err: any) {
     logger.error("aiConfig DELETE /models/:id", err);
@@ -426,10 +588,12 @@ export async function handle_POST_ai_config_models_sync_pricing(req: Request, re
     }
 
     if (!updated) {
-      // Mark as tried but not found
+      // Mark as tried but not found — disable auto_update so UI shows Manual Pricing
       await pg.queryP(
         `UPDATE polis_ai_model_pricing
-         SET last_pricing_sync_at = NOW(), pricing_sync_error = $1
+         SET last_pricing_sync_at = NOW(),
+             pricing_sync_error = $1,
+             auto_update_enabled = false
          WHERE model_name = $2 AND provider = $3`,
         ['Model not found in Litellm registry. Keeping manual pricing.', model_name, provider]
       );
@@ -578,13 +742,16 @@ export async function handle_GET_ai_config_provider_api_keys(req: Request, res: 
   if (!checkInternalKey(req, res)) return;
   try {
     const rows = await pg.queryP(
-      "SELECT id, provider, api_key, base_url, is_active, created_at, updated_at FROM polis_provider_api_keys ORDER BY provider"
+      `SELECT id, provider,
+              CASE WHEN length(api_key) > 8
+                   THEN left(api_key, 4) || '...' || right(api_key, 4)
+                   ELSE '****'
+              END AS masked_key,
+              base_url, is_active, created_at, updated_at
+       FROM polis_provider_api_keys
+       ORDER BY provider`
     );
-    const masked = rows.map((r: any) => ({
-      ...r,
-      api_key: maskApiKey(r.api_key),
-    }));
-    res.json({ keys: masked });
+    res.json({ keys: rows });
   } catch (err: any) {
     logger.error("aiConfig GET /provider-api-keys", err);
     res.status(500).json({ error: "Internal server error" });
@@ -594,20 +761,22 @@ export async function handle_GET_ai_config_provider_api_keys(req: Request, res: 
 export async function handle_POST_ai_config_provider_api_keys(req: Request, res: Response): Promise<void> {
   if (!checkInternalKey(req, res)) return;
   try {
-    const { provider, api_key, base_url } = req.body;
+    const rawProvider = req.body.provider;
+    const provider = typeof rawProvider === 'string' ? rawProvider.toLowerCase().trim() : rawProvider;
+    const { api_key, base_url } = req.body;
     if (!provider || !api_key) {
       res.status(400).json({ error: "provider and api_key are required" });
       return;
     }
 
-    // TODO: Add encryption layer for api_key storage (e.g. AES-256-GCM via ./utils/encryption)
+    const encryptedKey = encrypt(api_key.trim());
     const rows = await pg.queryP(
       `INSERT INTO polis_provider_api_keys (provider, api_key, base_url)
        VALUES ($1, $2, $3)
        ON CONFLICT (provider)
        DO UPDATE SET api_key = EXCLUDED.api_key, base_url = EXCLUDED.base_url, updated_at = NOW()
        RETURNING id, provider, api_key, base_url, is_active, created_at, updated_at`,
-      [provider, api_key, base_url ?? null]
+      [provider, encryptedKey, base_url ?? null]
     );
     const result = rows[0];
     result.api_key = maskApiKey(result.api_key);

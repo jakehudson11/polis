@@ -1,54 +1,46 @@
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import crypto from 'crypto';
-import { queryP } from '../db/pg-query';
-
-const ENCRYPTION_KEY = process.env.POLIS_INTERNAL_PROXY_SECRET || 'default-key-change-me';
-const ALGORITHM = 'aes-256-gcm';
+import { decrypt } from './encryption';
+import pg from '../db/pg-query';
 
 function decryptApiKey(encrypted: string): string {
   try {
-    const key = crypto.createHash('sha256').update(ENCRYPTION_KEY).digest();
-    const parts = encrypted.split(':');
-    if (parts.length !== 3) throw new Error('Invalid encrypted format');
-    const [iv, authTag, ciphertext] = parts;
-    const decipher = crypto.createDecipheriv(ALGORITHM, key, Buffer.from(iv, 'hex'));
-    decipher.setAuthTag(Buffer.from(authTag, 'hex'));
-    let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
+    return decrypt(encrypted);
   } catch {
-    // Try base64 format (Agora-compatible)
-    try {
-      const key = crypto.createHash('sha256').update(ENCRYPTION_KEY).digest();
-      const parts = encrypted.split(':');
-      if (parts.length !== 3) throw new Error('Invalid encrypted format');
-      const [ivB64, ciphertextB64, authTagB64] = parts;
-      const decipher = crypto.createDecipheriv(ALGORITHM, key, Buffer.from(ivB64, 'base64'));
-      decipher.setAuthTag(Buffer.from(authTagB64, 'base64'));
-      let decrypted = decipher.update(ciphertextB64, 'base64', 'utf8');
-      decrypted += decipher.final('utf8');
-      return decrypted;
-    } catch {
-      // If not encrypted (plain text stored), return as-is
-      return encrypted;
-    }
+    // If decryption fails, the key might be stored as plaintext (legacy)
+    // or encrypted with a different key. Return as-is.
+    return encrypted;
   }
 }
 
 async function resolvePolisProviderCredentials(provider: string): Promise<{ apiKey: string; baseUrl?: string } | null> {
   try {
-    const rows = await queryP(
+    const rows = await pg.queryP(
       'SELECT api_key, base_url FROM polis_provider_api_keys WHERE provider = $1 AND is_active = true',
       [provider.toLowerCase().trim()]
     );
     if (rows.length > 0) {
+      let baseUrl: string | undefined = rows[0].base_url || undefined;
+      if (!baseUrl) {
+        try {
+          const providerRows = await pg.queryP(
+            'SELECT base_url FROM polis_ai_providers WHERE name = $1 AND is_active = true ORDER BY id LIMIT 1',
+            [provider.toLowerCase().trim()]
+          );
+          if (providerRows.length > 0 && providerRows[0].base_url) {
+            baseUrl = providerRows[0].base_url;
+          }
+        } catch {
+          // Silently ignore — provider table lookup is best-effort
+        }
+      }
       return {
         apiKey: decryptApiKey(rows[0].api_key),
-        baseUrl: rows[0].base_url || undefined,
+        baseUrl,
       };
     }
+    console.warn(`[aiClients] No active API key found in DB for provider "${provider}"`);
   } catch (err) {
     console.warn(`[aiClients] Failed to load API key for ${provider} from DB:`, (err as Error).message);
   }
@@ -76,7 +68,7 @@ async function resolvePolisProviderCredentials(provider: string): Promise<{ apiK
 
 export async function createClientForProvider(provider: string): Promise<OpenAI | Anthropic | GoogleGenerativeAI> {
   const creds = await resolvePolisProviderCredentials(provider);
-  if (!creds) throw new Error(`No API key configured for "${provider}"`);
+  if (!creds) throw new Error(`No API key configured for "${provider}". Add it via Agora Superuser AI Config → Polis → Available Providers → API Key.`);
 
   if (provider === 'google') return new GoogleGenerativeAI(creds.apiKey);
   if (provider === 'anthropic') return new Anthropic({ apiKey: creds.apiKey, maxRetries: 0 });
