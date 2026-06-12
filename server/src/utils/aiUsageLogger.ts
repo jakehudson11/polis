@@ -23,6 +23,8 @@ interface ModelConfig {
   primaryProvider: string;
   backupModel: string | null;
   backupProvider: string | null;
+  fallbackModel: string | null;
+  fallbackProvider: string | null;
 }
 
 // ─── Public API ────────────────────────────────────────────
@@ -58,7 +60,7 @@ export async function logAiUsage(params: LogAiUsageParams): Promise<void> {
 export async function getModelConfig(useCaseKey: string): Promise<ModelConfig | null> {
   try {
     const rows = await pgQuery.queryP(
-      `SELECT primary_model, primary_provider, backup_model, backup_provider
+      `SELECT primary_model, primary_provider, backup_model, backup_provider, fallback_model, fallback_provider
        FROM polis_ai_use_case_config
        WHERE use_case_key = $1
        LIMIT 1`,
@@ -73,6 +75,8 @@ export async function getModelConfig(useCaseKey: string): Promise<ModelConfig | 
       primaryProvider: row.primary_provider,
       backupModel: row.backup_model ?? null,
       backupProvider: row.backup_provider ?? null,
+      fallbackModel: row.fallback_model ?? null,
+      fallbackProvider: row.fallback_provider ?? null,
     };
   } catch (error) {
     console.error('[aiUsageLogger] failed to get model config', error);

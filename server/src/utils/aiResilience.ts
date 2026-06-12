@@ -151,6 +151,8 @@ export async function callWithFallback<T>(options: {
   primaryProvider: string;
   backupModel?: string;
   backupProvider?: string;
+  fallbackModel?: string;
+  fallbackProvider?: string;
   primaryFn: (model: string, provider: string) => Promise<T>;
   backupFn?: (model: string, provider: string) => Promise<T>;
   timeout?: number;
@@ -163,6 +165,8 @@ export async function callWithFallback<T>(options: {
     primaryProvider,
     backupModel,
     backupProvider,
+    fallbackModel,
+    fallbackProvider,
     primaryFn,
     backupFn,
     timeout,
@@ -172,6 +176,7 @@ export async function callWithFallback<T>(options: {
 
   const primaryBreaker = getCircuitBreaker(primaryProvider);
   let primaryError: unknown;
+  let backupError: unknown;
 
   const startTime = Date.now();
   try {
@@ -212,15 +217,49 @@ export async function callWithFallback<T>(options: {
     );
     logMetrics(backupProvider, Date.now() - backupStart, true);
     return result;
-  } catch (backupError) {
-    logMetrics(backupProvider, Date.now() - backupStart, false, classifyError(backupError));
+  } catch (err) {
+    backupError = err;
+    logMetrics(backupProvider, Date.now() - backupStart, false, classifyError(err));
     console.error(
       `[ai-fallback] Backup ${backupProvider}/${backupModel} also failed for ${label}`
     );
-    const primaryMsg = (primaryError as { message?: string })?.message ?? String(primaryError);
-    const backupMsg = (backupError as { message?: string })?.message ?? String(backupError);
-    throw new Error(
-      `AI call failed for ${label}: primary (${primaryProvider}/${primaryModel}): ${primaryMsg}; backup (${backupProvider}/${backupModel}): ${backupMsg}`
-    );
   }
+
+  // ─── Fallback tier ──────────────────────────────────────
+  if (fallbackModel && fallbackProvider) {
+    console.warn(
+      `[ai-fallback] Both primary and backup failed for ${label}, trying fallback ${fallbackProvider}/${fallbackModel}`
+    );
+
+    const fallbackBreaker = getCircuitBreaker(fallbackProvider);
+    const fallbackStart = Date.now();
+    try {
+      const fallbackCallFn = backupCall ?? primaryFn;
+      const result = await enqueueAiCall(
+        fallbackProvider,
+        () => retryWithBackoff(
+          () => fallbackBreaker.fire(() => fallbackCallFn(fallbackModel!, fallbackProvider!)) as Promise<T>,
+          { maxRetries: 3, timeout },
+        ),
+        priority,
+      );
+      logMetrics(fallbackProvider, Date.now() - fallbackStart, true);
+      console.log(`[ai-fallback] Fallback ${fallbackProvider}/${fallbackModel} succeeded for ${label}`);
+      return result;
+    } catch (fallbackError) {
+      logMetrics(fallbackProvider, Date.now() - fallbackStart, false, classifyError(fallbackError));
+      console.error(
+        `[ai-fallback] Fallback ${fallbackProvider}/${fallbackModel} also failed for ${label}`
+      );
+    }
+  }
+
+  const primaryMsg = (primaryError as { message?: string })?.message ?? String(primaryError);
+  const backupMsg = (backupError as { message?: string })?.message ?? String(backupError);
+  const fallbackTag = fallbackModel && fallbackProvider
+    ? `; fallback (${fallbackProvider}/${fallbackModel})`
+    : '';
+  throw new Error(
+    `AI call failed for ${label}: primary (${primaryProvider}/${primaryModel}): ${primaryMsg}; backup (${backupProvider}/${backupModel}): ${backupMsg}${fallbackTag}`
+  );
 }

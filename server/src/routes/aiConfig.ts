@@ -304,7 +304,7 @@ export async function handle_PUT_ai_config_use_cases(req: Request, res: Response
   if (!checkInternalKey(req, res)) return;
   try {
     const { useCaseKey } = req.params;
-    const { primary_model, primary_provider, backup_model, backup_provider } = req.body;
+    const { primary_model, primary_provider, backup_model, backup_provider, fallback_model, fallback_provider } = req.body;
     
     if (!primary_model || !primary_provider) {
       res.status(400).json({ error: "primary_model and primary_provider are required" });
@@ -333,13 +333,25 @@ export async function handle_PUT_ai_config_use_cases(req: Request, res: Response
       }
     }
     
+    // Validate fallback if provided
+    if (fallback_model && fallback_provider) {
+      const fallbackCheck = await pg.queryP(
+        "SELECT id FROM polis_ai_model_pricing WHERE model_name = $1 AND provider = $2",
+        [fallback_model, fallback_provider]
+      );
+      if (fallbackCheck.length === 0) {
+        res.status(400).json({ error: `Fallback model ${fallback_model}/${fallback_provider} not found` });
+        return;
+      }
+    }
+    
     const rows = await pg.queryP(
-      `INSERT INTO polis_ai_use_case_config (use_case_key, primary_model, primary_provider, backup_model, backup_provider, modality, updated_at)
-       VALUES ($1, $2, $3, $4, $5, 'llm', NOW())
+      `INSERT INTO polis_ai_use_case_config (use_case_key, primary_model, primary_provider, backup_model, backup_provider, fallback_model, fallback_provider, modality, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'llm', NOW())
        ON CONFLICT (use_case_key)
-       DO UPDATE SET primary_model = $2, primary_provider = $3, backup_model = $4, backup_provider = $5, updated_at = NOW()
+       DO UPDATE SET primary_model = $2, primary_provider = $3, backup_model = $4, backup_provider = $5, fallback_model = $6, fallback_provider = $7, updated_at = NOW()
        RETURNING *`,
-      [useCaseKey, primary_model, primary_provider, backup_model ?? null, backup_provider ?? null]
+      [useCaseKey, primary_model, primary_provider, backup_model ?? null, backup_provider ?? null, fallback_model ?? null, fallback_provider ?? null]
     );
     
     res.json({ config: rows[0] });

@@ -69,3 +69,14 @@ minio_data/
 # Backup files
 *.bak
 *.backup
+
+# Scratch and diagnostic files
+_check*
+_clear*
+_diag*
+_debug*
+_fix*
+_inspect*
+_trigger*
+tmp_*
+null
