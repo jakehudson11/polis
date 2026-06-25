@@ -5,6 +5,15 @@ import logger from "../utils/logger";
 import { callAIProvider } from "../utils/aiModelRouter";
 import { encrypt, decrypt } from "../utils/encryption";
 
+/**
+ * Normalizes a provider name for comparison by removing non-alphanumeric
+ * characters and lowercasing. Mirrors Agora's canonicalProvider logic
+ * so that provider compatibility checks align across both systems.
+ */
+function normalizeProviderName(p: string): string {
+  return (p || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+
 async function loadPricingAliases(): Promise<Record<string, string>> {
   try {
     const rows = await pg.queryP(
@@ -91,13 +100,26 @@ async function resolvePricingFromRegistry(
       modelKey = Object.keys(data).find(k => k.toLowerCase() === `${provider}/${searchName}`.toLowerCase());
     }
 
-    // Stage 3: base-name fallback
+    // Stage 3: provider-compatible base-name fallback
+    // Only matches entries from compatible providers (mirrors Agora's isProviderCompatible).
     if (!modelKey) {
-      modelKey = Object.keys(data).find(k => {
+      const normalizedProvider = normalizeProviderName(provider);
+      const baseNameCandidates: Array<{ key: string; entry: any }> = [];
+      for (const k of Object.keys(data)) {
         const parts = k.split('/').map((p: string) => p.trim()).filter(Boolean);
         const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
-        return base === searchName;
-      });
+        if (base === searchName) {
+          const entry = data[k];
+          const entryProvider = normalizeProviderName(entry?.litellm_provider || '');
+          if (!provider || entryProvider === normalizedProvider) {
+            baseNameCandidates.push({ key: k, entry });
+          }
+        }
+      }
+      if (baseNameCandidates.length > 0) {
+        baseNameCandidates.sort((a, b) => a.key.length - b.key.length || a.key.localeCompare(b.key));
+        modelKey = baseNameCandidates[0].key;
+      }
     }
 
     if (!modelKey) return null;
@@ -587,13 +609,29 @@ export async function handle_POST_ai_config_models_sync_pricing(req: Request, re
             modelKey = Object.keys(data).find(k => k.toLowerCase() === `${provider}/${normalized}`.toLowerCase());
           }
 
-          // Stage B3: base-name fallback
+          // Stage B3: provider-compatible base-name fallback
+          // Only matches entries from compatible providers (mirrors Agora's isProviderCompatible).
+          // This prevents e.g. Z.AI/glm-5.2 from auto-matching cloudflare/@cf/zai-org/glm-5.2.
           if (!modelKey) {
-            modelKey = Object.keys(data).find(k => {
-              const parts = k.split('/').map(p => p.trim()).filter(Boolean);
+            const normalizedProvider = normalizeProviderName(provider);
+            const baseNameCandidates: Array<{ key: string; entry: any }> = [];
+            for (const k of Object.keys(data)) {
+              const parts = k.split('/').map((p: string) => p.trim()).filter(Boolean);
               const base = (parts.length > 1 ? parts[parts.length - 1] : k).toLowerCase();
-              return base === normalized;
-            });
+              if (base === normalized) {
+                const entry = data[k];
+                const entryProvider = normalizeProviderName(entry?.litellm_provider || '');
+                // Only match if providers are compatible (or if requested provider is empty)
+                if (!provider || entryProvider === normalizedProvider) {
+                  baseNameCandidates.push({ key: k, entry });
+                }
+              }
+            }
+            if (baseNameCandidates.length > 0) {
+              // Pick the shortest key (closest match), then alphabetical
+              baseNameCandidates.sort((a, b) => a.key.length - b.key.length || a.key.localeCompare(b.key));
+              modelKey = baseNameCandidates[0].key;
+            }
           }
         }
         if (modelKey) {

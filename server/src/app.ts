@@ -36,6 +36,7 @@ import {
   handle_GET_delphi,
   handle_GET_delphi_job_logs,
   handle_GET_delphi_queue_position,
+  handle_GET_delphi_queue_stats,
 } from "./src/routes/delphi";
 import { handle_GET_delphi_visualizations } from "./src/routes/delphi/visualizations";
 import { handle_POST_delphi_jobs } from "./src/routes/delphi/jobs";
@@ -1070,6 +1071,8 @@ helpersInitialized.then(
     app.get("/api/v3/delphi/logs", moveToBody, handle_GET_delphi_job_logs);
 
     app.get("/api/v3/delphi/queue-position", moveToBody, handle_GET_delphi_queue_position);
+
+    app.get("/api/v3/delphi/queue-stats", handle_GET_delphi_queue_stats);
 
     // Add POST endpoint for creating Delphi jobs
     app.post(

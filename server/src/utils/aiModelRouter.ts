@@ -11,13 +11,28 @@ export interface AIRouterOptions {
   temperature?: number;
 }
 
+/**
+ * Clamps temperature for providers that only accept specific values.
+ * Moonshot (Kimi) models require temperature = 1.0 exactly.
+ */
+function clampTemperatureForProvider(provider: string, model: string, temperature: number): number {
+  const isMoonshotProvider = provider.trim().toLowerCase() === 'moonshot';
+  const isKimiModel = model.toLowerCase().includes('kimi');
+  if (isMoonshotProvider || isKimiModel) {
+    return 1.0;
+  }
+  return temperature;
+}
+
 export async function callAIProvider(
   model: string,
   provider: string,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   options: AIRouterOptions = {}
 ): Promise<NormalizedAIResponse> {
-  const { maxTokens = 1024, temperature = 0.5 } = options;
+  const rawTemperature = options.temperature ?? 0.5;
+  const temperature = clampTemperatureForProvider(provider, model, rawTemperature);
+  const { maxTokens = 1024 } = options;
   const client = await createClientForProvider(provider);
 
   if (provider === 'google') {

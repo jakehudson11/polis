@@ -5,13 +5,23 @@ import { decrypt } from './encryption';
 import pg from '../db/pg-query';
 
 function decryptApiKey(encrypted: string): string {
-  try {
+  // Heuristic: if the string has exactly 2 colons and looks like base64-encoded
+  // ciphertext (IV:ciphertext:authTag), it is encrypted and MUST be decrypted.
+  // If decryption fails, throw — returning the encrypted blob would cause API
+  // calls to fail with misleading errors (e.g. hitting api.openai.com with a
+  // base64 blob instead of a real API key).
+  const looksEncrypted =
+    typeof encrypted === 'string' &&
+    encrypted.split(':').length === 3 &&
+    encrypted.length > 32;
+
+  if (looksEncrypted) {
+    // This looks like an AES-256-GCM ciphertext. Decryption must succeed.
     return decrypt(encrypted);
-  } catch {
-    // If decryption fails, the key might be stored as plaintext (legacy)
-    // or encrypted with a different key. Return as-is.
-    return encrypted;
   }
+
+  // Legacy plaintext key — use as-is
+  return encrypted;
 }
 
 async function resolvePolisProviderCredentials(provider: string): Promise<{ apiKey: string; baseUrl?: string } | null> {
@@ -25,7 +35,7 @@ async function resolvePolisProviderCredentials(provider: string): Promise<{ apiK
       if (!baseUrl) {
         try {
           const providerRows = await pg.queryP(
-            'SELECT base_url FROM polis_ai_providers WHERE name = $1 AND is_active = true ORDER BY id LIMIT 1',
+            'SELECT base_url FROM polis_ai_providers WHERE LOWER(name) = LOWER($1) AND is_active = true ORDER BY id LIMIT 1',
             [provider.toLowerCase().trim()]
           );
           if (providerRows.length > 0 && providerRows[0].base_url) {
@@ -35,6 +45,17 @@ async function resolvePolisProviderCredentials(provider: string): Promise<{ apiK
           // Silently ignore — provider table lookup is best-effort
         }
       }
+      // Warn if a non-standard provider has no base_url — OpenAI client will
+      // default to api.openai.com, which is almost certainly wrong.
+      const standardProviders = new Set(['openai', 'anthropic', 'google', 'gemini', 'deepseek', 'qwen']);
+      if (!baseUrl && !standardProviders.has(provider.toLowerCase().trim())) {
+        console.warn(
+          `[aiClients] Provider "${provider}" has an API key but no base_url configured. ` +
+          `The OpenAI-compatible client will default to https://api.openai.com/v1, ` +
+          `which is likely incorrect. Set base_url in polis_ai_providers or polis_provider_api_keys.`
+        );
+      }
+
       return {
         apiKey: decryptApiKey(rows[0].api_key),
         baseUrl,

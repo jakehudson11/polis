@@ -416,3 +416,58 @@ export async function handle_GET_delphi_queue_position(req: Request, res: Respon
     return res.status(500).json({ status: "error", message: err.message });
   }
 }
+
+export async function handle_GET_delphi_queue_stats(req: Request, res: Response) {
+  try {
+    const tableName = "Delphi_JobQueue";
+    const statusIndex = "StatusCreatedIndex";
+
+    const [pending, processing, completed, failed] = await Promise.all([
+      docClient.send(new QueryCommand({
+        TableName: tableName,
+        IndexName: statusIndex,
+        KeyConditionExpression: "#s = :status",
+        ExpressionAttributeNames: { "#s": "status" },
+        ExpressionAttributeValues: { ":status": "PENDING" },
+        Select: "COUNT",
+      })),
+      docClient.send(new QueryCommand({
+        TableName: tableName,
+        IndexName: statusIndex,
+        KeyConditionExpression: "#s = :status",
+        ExpressionAttributeNames: { "#s": "status" },
+        ExpressionAttributeValues: { ":status": "PROCESSING" },
+        Select: "COUNT",
+      })),
+      docClient.send(new QueryCommand({
+        TableName: tableName,
+        IndexName: statusIndex,
+        KeyConditionExpression: "#s = :status",
+        ExpressionAttributeNames: { "#s": "status" },
+        ExpressionAttributeValues: { ":status": "COMPLETED" },
+        Select: "COUNT",
+      })),
+      docClient.send(new QueryCommand({
+        TableName: tableName,
+        IndexName: statusIndex,
+        KeyConditionExpression: "#s = :status",
+        ExpressionAttributeNames: { "#s": "status" },
+        ExpressionAttributeValues: { ":status": "FAILED" },
+        Select: "COUNT",
+      })),
+    ]);
+
+    return res.json({
+      backend: "dynamodb",
+      stats: {
+        pending: pending.Count || 0,
+        processing: processing.Count || 0,
+        completed: completed.Count || 0,
+        failed: failed.Count || 0,
+      },
+    });
+  } catch (err: any) {
+    logger.error(`Error in Delphi queue stats: ${err.message}`);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+}
