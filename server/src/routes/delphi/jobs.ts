@@ -311,3 +311,82 @@ async function getConversationIdFromReportId(
     return null;
   }
 }
+
+// Handler for GET /api/v3/delphi/jobs - List Delphi jobs
+export async function handle_GET_delphi_jobs(
+  req: Request,
+  res: Response
+): Promise<void> {
+  try {
+    if (!req.p?.delphiEnabled) {
+      res.status(403).json({ status: "error", error: "Unauthorized" });
+      return;
+    }
+    const { status, limit = "50", conversation_id } = req.query;
+    const parsedLimit = Math.min(100, Math.max(1, parseInt(limit as string, 10) || 50));
+    const filterParts: string[] = [];
+    const expressionValues: Record<string, any> = {};
+    const expressionNames: Record<string, string> = {};
+    if (status && status !== "all") {
+      filterParts.push("#s = :status");
+      expressionNames["#s"] = "status";
+      expressionValues[":status"] = status;
+    }
+    if (conversation_id) {
+      filterParts.push("conversation_id = :zid");
+      expressionValues[":zid"] = conversation_id;
+    }
+    const params: any = { TableName: "Delphi_JobQueue", Limit: parsedLimit };
+    if (filterParts.length > 0) {
+      params.FilterExpression = filterParts.join(" AND ");
+      params.ExpressionAttributeValues = expressionValues;
+      if (Object.keys(expressionNames).length > 0) {
+        params.ExpressionAttributeNames = expressionNames;
+      }
+    }
+    const result = await docClient.scan(params);
+    const jobs = (result.Items || []).map((item: any) => ({
+      jobId: item.job_id,
+      status: item.status,
+      jobType: item.job_type,
+      priority: item.priority,
+      conversationId: item.conversation_id,
+      reportId: item.report_id || null,
+      retryCount: item.retry_count || 0,
+      maxRetries: item.max_retries || 3,
+      createdAt: item.created_at,
+      startedAt: item.started_at || null,
+      completedAt: item.completed_at || null,
+      workerId: item.worker_id || null,
+      error: item.error || null,
+      jobConfig: item.job_config || null,
+    }));
+    res.json({ status: "success", jobs, total: result.Count || jobs.length });
+  } catch (err: any) {
+    logger.error("Error fetching Delphi jobs:", err);
+    res.status(500).json({ status: "error", error: err.message || "Internal server error" });
+  }
+}
+
+// Handler for GET /api/v3/delphi/queue-stats - Get queue statistics
+export async function handle_GET_delphi_queue_stats(
+  _req: Request,
+  res: Response
+): Promise<void> {
+  try {
+    const result = await docClient.scan({
+      TableName: "Delphi_JobQueue",
+      ProjectionExpression: "#s",
+      ExpressionAttributeNames: { "#s": "status" },
+    });
+    const stats: Record<string, number> = { PENDING: 0, PROCESSING: 0, COMPLETED: 0, FAILED: 0 };
+    for (const item of result.Items || []) {
+      const s = item.status;
+      if (s in stats) stats[s]++;
+    }
+    res.json({ status: "success", backend: "dynamodb", stats });
+  } catch (err: any) {
+    logger.error("Error fetching Delphi queue stats:", err);
+    res.status(500).json({ status: "error", error: err.message || "Internal server error" });
+  }
+}
