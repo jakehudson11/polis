@@ -28,12 +28,14 @@ export async function generateSeedComments(
     const model = process.env.OPENAI_MODEL || modelConfig?.primaryModel || "gpt-4o-mini";
     const primaryProvider = modelConfig?.primaryProvider ?? 'openai';
 
-    const response = await callWithFallback({
+    const { result, usedModel, usedProvider, usedTier } = await callWithFallback({
       label: 'seed_comments',
       primaryModel: model,
       primaryProvider,
       backupModel: modelConfig?.backupModel ?? undefined,
       backupProvider: modelConfig?.backupProvider ?? undefined,
+      fallbackModel: modelConfig?.fallbackModel ?? undefined,
+      fallbackProvider: modelConfig?.fallbackProvider ?? undefined,
       primaryFn: async (model, provider) => {
         return callAIProvider(model, provider, [
           { role: 'system', content: systemPrompt },
@@ -57,17 +59,18 @@ export async function generateSeedComments(
         const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
         await logAiUsage({
           use_case: 'seed_comment_generator',
-          model,
-          provider: modelConfig?.primaryProvider ?? 'openai',
-          input_tokens: response.inputTokens,
-          output_tokens: response.outputTokens,
+          model: usedModel,
+          provider: usedProvider,
+          input_tokens: result.inputTokens,
+          output_tokens: result.outputTokens,
           deliberation_id: deliberationId ?? undefined,
           admin_user_id: adminUserId ?? undefined,
+          origin: 'polis',
         });
       })().catch(() => {});
     }
 
-    const content = response.content;
+    const content = result.content;
     if (!content) {
       throw new Error("No content in OpenAI response");
     }

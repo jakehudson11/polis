@@ -143,6 +143,15 @@ function logMetrics(provider: string, latencyMs: number, success: boolean, error
   console.log(`[ai-metrics] ${provider} call: ${latencyMs}ms, success: ${success}${errorType ? `, error: ${errorType}` : ''}`);
 }
 
+// ─── FallbackResult type ───────────────────────────────────
+
+export interface FallbackResult<T> {
+  result: T;
+  usedModel: string;
+  usedProvider: string;
+  usedTier: 'primary' | 'backup' | 'fallback';
+}
+
 // ─── callWithFallback ──────────────────────────────────────
 
 export async function callWithFallback<T>(options: {
@@ -158,7 +167,7 @@ export async function callWithFallback<T>(options: {
   timeout?: number;
   maxRetries?: number;
   priority?: number;
-}): Promise<T> {
+}): Promise<FallbackResult<T>> {
   const {
     label,
     primaryModel,
@@ -189,7 +198,7 @@ export async function callWithFallback<T>(options: {
       priority,
     );
     logMetrics(primaryProvider, Date.now() - startTime, true);
-    return result;
+    return { result, usedModel: primaryModel, usedProvider: primaryProvider, usedTier: 'primary' };
   } catch (err) {
     logMetrics(primaryProvider, Date.now() - startTime, false, classifyError(err));
     primaryError = err;
@@ -216,7 +225,7 @@ export async function callWithFallback<T>(options: {
       priority,
     );
     logMetrics(backupProvider, Date.now() - backupStart, true);
-    return result;
+    return { result, usedModel: backupModel, usedProvider: backupProvider, usedTier: 'backup' };
   } catch (err) {
     backupError = err;
     logMetrics(backupProvider, Date.now() - backupStart, false, classifyError(err));
@@ -245,7 +254,7 @@ export async function callWithFallback<T>(options: {
       );
       logMetrics(fallbackProvider, Date.now() - fallbackStart, true);
       console.log(`[ai-fallback] Fallback ${fallbackProvider}/${fallbackModel} succeeded for ${label}`);
-      return result;
+      return { result, usedModel: fallbackModel!, usedProvider: fallbackProvider!, usedTier: 'fallback' };
     } catch (fallbackError) {
       logMetrics(fallbackProvider, Date.now() - fallbackStart, false, classifyError(fallbackError));
       console.error(

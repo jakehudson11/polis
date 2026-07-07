@@ -16,6 +16,8 @@ interface LogAiUsageParams {
   output_tokens: number;
   deliberation_id?: string;
   admin_user_id?: number;
+  origin?: string;
+  error_type?: string;
 }
 
 interface ModelConfig {
@@ -35,7 +37,7 @@ interface ModelConfig {
  */
 export async function logAiUsage(params: LogAiUsageParams): Promise<void> {
   try {
-    const { use_case, model, provider, input_tokens, output_tokens, deliberation_id, admin_user_id } = params;
+    const { use_case, model, provider, input_tokens, output_tokens, deliberation_id, admin_user_id, origin, error_type } = params;
 
     const response = await fetch(`${agoraBackendUrl}/api/v1/internal/ai-usage`, {
       method: 'POST',
@@ -43,7 +45,7 @@ export async function logAiUsage(params: LogAiUsageParams): Promise<void> {
         'Content-Type': 'application/json',
         'x-polis-internal-key': polisInternalProxySecret,
       },
-      body: JSON.stringify({ use_case, model, provider, input_tokens, output_tokens, deliberation_id, admin_user_id }),
+      body: JSON.stringify({ use_case, model, provider, input_tokens, output_tokens, deliberation_id, admin_user_id, origin, error_type }),
     });
     if (!response.ok) {
       console.error(`[aiUsageLogger] Agora returned ${response.status}: ${await response.text().catch(() => '')}`);

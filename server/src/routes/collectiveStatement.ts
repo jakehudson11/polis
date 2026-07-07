@@ -176,12 +176,14 @@ You MUST respond with valid JSON that follows the exact schema above. Each claus
         usage: { input_tokens: result.inputTokens, output_tokens: result.outputTokens },
       };
     };
-    const response = await callWithFallback({
+    const { result: response, usedModel, usedProvider, usedTier } = await callWithFallback({
       label: 'collective_statement',
       primaryModel: claudeModel,
       primaryProvider: delphiModelConfig?.primaryProvider ?? 'anthropic',
       backupModel: delphiModelConfig?.backupModel ?? undefined,
       backupProvider: delphiModelConfig?.backupProvider ?? undefined,
+      fallbackModel: delphiModelConfig?.fallbackModel ?? undefined,
+      fallbackProvider: delphiModelConfig?.fallbackProvider ?? undefined,
       primaryFn: async (model, provider) => callProvider(model, provider),
       backupFn: async (model, provider) => callProvider(model, provider),
       timeout: AI_TIMEOUTS.REPORT,
@@ -194,12 +196,13 @@ You MUST respond with valid JSON that follows the exact schema above. Each claus
       const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
       await logAiUsage({
         use_case: 'delphi_report',
-        model: claudeModel,
-        provider: delphiModelConfig?.primaryProvider ?? 'anthropic',
+        model: usedModel,
+        provider: usedProvider,
         input_tokens: (response as any).usage?.input_tokens || 0,
         output_tokens: (response as any).usage?.output_tokens || 0,
         deliberation_id: deliberationId ?? undefined,
         admin_user_id: adminUserId ?? undefined,
+        origin: 'polis',
       });
     })().catch(() => {});
 

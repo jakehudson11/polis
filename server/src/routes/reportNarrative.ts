@@ -24,6 +24,7 @@ import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForD
 import { getOpenAIClient, getAnthropicClient, getGeminiClient } from "../utils/aiClients";
 import { callWithFallback, retryWithBackoff, AI_TIMEOUTS } from "../utils/aiResilience";
 import { enqueueAiCall, AI_PRIORITY } from "../utils/aiProviderQueues";
+import { callAIProvider } from "../utils/aiModelRouter";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const js2xmlparser = require("js2xmlparser");
@@ -233,145 +234,87 @@ const getModelResponse = async (
         ]
       }`;
     }
-    const gemeniModel = genAI?.getGenerativeModel({
-      // model: "gemini-1.5-pro-002",
-      model: modelVersion || "gemini-2.0-pro-exp-02-05",
-      generationConfig: {
-        // https://cloud.google.com/vertex-ai/docs/reference/rest/v1/GenerationConfig
-        responseMimeType: "application/json",
-        maxOutputTokens: 50000, // high for reliability for now.
-      },
-    });
-    const gemeniModelprompt: GenerateContentRequest = {
-      contents: [
-        {
-          parts: [
-            {
-              text: `
-                  ${prompt_xml}
-  
-                  You MUST respond with a JSON object that follows this EXACT structure:
-  
-                  \`\`\`json
-                  {
-                    "key1": "string value",
-                    "key2": [
-                      {
-                        "nestedKey1": 123,
-                        "nestedKey2": "another string"
-                      }
-                    ],
-                    "key3": true
-                  }
-                  \`\`\`
-  
-                  Make sure the JSON is VALID, as defined at https://www.json.org/json-en.html. DO NOT begin with an array '[' - begin with an object '{' - All keys MUST be enclosed in double quotes. NO trailing comma's should be included after the last element in a block (not valid json). Do NOT include any additional text outside of the JSON object.  Do not provide explanations, only the JSON.
+    // Read tiered model config from DB (primary → backup → fallback)
+    const delphiModelConfig = await getModelConfig('delphi_report');
+    const primaryModel = modelVersion || delphiModelConfig?.primaryModel || "claude-sonnet-4-20250514";
+    const primaryProvider = delphiModelConfig?.primaryProvider ?? 'anthropic';
 
-                  The following is an example of an INVALID response:
-                  \`\`\`json
-                  {
-                  "key1": "string value",
-                  "array": [1,2,3], // <-- THIS IS INVALID BECAUSE OF A TRAILING COMMA. NO TRAILING COMMAS ARE PERMITTED IN THE RESPONSE .VALID JSON ONLY
-                  }
-                `,
-            },
-          ],
-          role: "user",
-        },
-      ],
-      systemInstruction: system_lore,
-    };
-    const openai = (() => {
-      try { return getOpenAIClient(); } catch { return null; }
-    })();
-
-    switch (model) {
-      case "gemini": {
-        if (!gemeniModel) {
-          throw new Error("polis_err_gemini_api_key_not_set");
-        }
-        const respGem = await enqueueAiCall(
-          'google',
-          () => retryWithBackoff(
-            () => gemeniModel.generateContent(gemeniModelprompt),
-            { maxRetries: 2, timeout: AI_TIMEOUTS.REPORT }
-          ),
-          AI_PRIORITY.BACKGROUND,
-        );
-        const result = await respGem.response.text();
-        return result;
-      }
-      case "claude": {
+    // Unified provider caller — handles all three providers
+    const callProvider = async (aiModel: string, provider: string) => {
+      if (provider === 'anthropic') {
         if (!anthropic) {
           throw new Error("polis_err_anthropic_api_key_not_set");
         }
-        const delphiModelConfig = await getModelConfig('delphi_report');
-        const claudeModel = modelVersion || delphiModelConfig?.primaryModel || "claude-3-7-sonnet-20250219";
-        const responseClaude = await enqueueAiCall(
-          'anthropic',
-          () => retryWithBackoff(
-            () => anthropic.messages.create({
-              model: claudeModel,
-              max_tokens: 3000,
-              temperature: 0,
-              system: system_lore,
-              messages: [
-                {
-                  role: "user",
-                  content: [{ type: "text", text: prompt_xml }],
-                },
-                {
-                  role: "assistant",
-                  content: [{ type: "text", text: "{" }],
-                },
-              ],
-            }),
-            { maxRetries: 2, timeout: AI_TIMEOUTS.REPORT }
-          ),
-          AI_PRIORITY.BACKGROUND,
-        );
-        // Fire-and-forget AI usage logging
-        if (zid) {
-          (async () => {
-            const deliberationId = await mapConversationToDeliberation(zid);
-            const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
-            await logAiUsage({
-              use_case: 'delphi_report',
-              model: claudeModel,
-              provider: 'anthropic',
-              input_tokens: (responseClaude as any).usage?.input_tokens || 0,
-              output_tokens: (responseClaude as any).usage?.output_tokens || 0,
-              deliberation_id: deliberationId ?? undefined,
-              admin_user_id: adminUserId ?? undefined,
-            });
-          })().catch(() => {});
-        }
-        // Claude API response structure might change with version updates
-        return `{${(responseClaude as any)?.content[0]?.text}`;
+        // Use the Claude prefill trick for JSON-mode responses
+        return anthropic.messages.create({
+          model: aiModel,
+          max_tokens: 3000,
+          temperature: 0,
+          system: system_lore,
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: prompt_xml }],
+            },
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "{" }],
+            },
+          ],
+        });
       }
-      case "openai": {
-        if (!openai) {
-          throw new Error("polis_err_openai_api_key_not_set");
-        }
-        const responseOpenAI = await enqueueAiCall(
-          'openai',
-          () => retryWithBackoff(
-            () => openai.chat.completions.create({
-              model: modelVersion || "gpt-4o",
-              messages: [
-                { role: "system", content: system_lore },
-                { role: "user", content: prompt_xml },
-              ],
-            }),
-            { maxRetries: 2, timeout: AI_TIMEOUTS.REPORT }
-          ),
-          AI_PRIORITY.BACKGROUND,
-        );
-        return responseOpenAI.choices[0].message.content;
-      }
-      default:
-        return "";
+
+      // For non-anthropic providers (google, openai, etc.), use callAIProvider
+      const result = await callAIProvider(aiModel, provider, [
+        { role: 'system', content: system_lore },
+        { role: 'user', content: prompt_xml },
+      ], { maxTokens: 3000, temperature: 0 });
+
+      return {
+        content: [{ type: 'text' as const, text: result.content }],
+        usage: { input_tokens: result.inputTokens, output_tokens: result.outputTokens },
+      };
+    };
+
+    const { result: response, usedModel, usedProvider, usedTier } = await callWithFallback({
+      label: 'delphi_report',
+      primaryModel,
+      primaryProvider,
+      backupModel: delphiModelConfig?.backupModel ?? undefined,
+      backupProvider: delphiModelConfig?.backupProvider ?? undefined,
+      fallbackModel: delphiModelConfig?.fallbackModel ?? undefined,
+      fallbackProvider: delphiModelConfig?.fallbackProvider ?? undefined,
+      primaryFn: async (m, p) => callProvider(m, p),
+      backupFn: async (m, p) => callProvider(m, p),
+      timeout: AI_TIMEOUTS.REPORT,
+      priority: AI_PRIORITY.BACKGROUND,
+    });
+
+    // Fire-and-forget AI usage logging
+    if (zid) {
+      (async () => {
+        const deliberationId = await mapConversationToDeliberation(zid);
+        const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
+        await logAiUsage({
+          use_case: 'delphi_report',
+          model: usedModel,
+          provider: usedProvider,
+          input_tokens: (response as any).usage?.input_tokens || 0,
+          output_tokens: (response as any).usage?.output_tokens || 0,
+          deliberation_id: deliberationId ?? undefined,
+          admin_user_id: adminUserId ?? undefined,
+          origin: 'polis',
+        });
+      })().catch(() => {});
     }
+
+    // Extract response text based on provider
+    // Anthropic prefill trick: assistant already provided '{', so we prepend it
+    if (usedProvider === 'anthropic') {
+      return `{${(response as any).content[0].text}`;
+    }
+    // Non-anthropic: callAIProvider already normalizes to { content: [{ text }] }
+    return (response as any).content[0].text;
   } catch (error) {
     logger.error("ERROR IN GETMODELRESPONSE", error);
     return `{

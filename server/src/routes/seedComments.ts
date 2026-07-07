@@ -49,7 +49,7 @@ export async function handle_POST_generate_seed_comments(
     // 1. Verify caller is conversation owner
     const isConvoOwner = await isOwner(zid, uid!);
     if (!isConvoOwner) {
-      failJson(res, 403, "polis_err_generate_seed_comments_auth");
+      failJson(res, 403, "polis_err_seed_generation_failed_auth");
       return;
     }
 
@@ -228,14 +228,18 @@ export async function handle_POST_generate_seed_comments(
     });
 
     // Determine appropriate error message
-    let errorCode = "polis_err_generate_seed_comments";
-    if (error.message?.includes("OpenAI API key")) {
-      errorCode = "polis_err_openai_not_configured";
+    let errorCode = "polis_err_seed_generation_failed";
+    let userMessage = "AI generation failed. All configured model providers returned errors. This is temporary — please try submitting again.";
+    if (error.message?.includes("API key")) {
+      errorCode = "polis_err_seed_generation_not_configured";
+      userMessage = "AI generation failed. No API key configured for the model provider. Please check your AI configuration.";
     } else if (error.message?.includes("Failed to generate")) {
-      errorCode = "polis_err_openai_generation_failed";
+      errorCode = "polis_err_seed_generation_failed";
+    } else if (error.message?.includes("No content")) {
+      userMessage = "AI generation failed. The model returned an empty response. This is temporary — please try submitting again.";
     }
 
-    failJson(res, 500, errorCode, error);
+    failJson(res, 500, errorCode, error, { userMessage });
   }
 }
 
