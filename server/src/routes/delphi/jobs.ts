@@ -5,6 +5,7 @@ import { DynamoDBDocument } from "@aws-sdk/lib-dynamodb";
 import logger from "../../utils/logger";
 import { getZidFromReport } from "../../utils/parameter";
 import Config from "../../config";
+import { mapConversationToDeliberation, getModelConfig, logAiUsage } from "../../utils/aiUsageLogger";
 import pg from "../../db/pg-query";
 
 // Initialize DynamoDB client
@@ -55,11 +56,46 @@ export async function handle_POST_delphi_jobs(
       priority = 50,
       max_votes,
       batch_size,
-      // Prefer the runtime-configured Anthropic model to avoid defaulting to an unsupported name.
-      model = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514",
+      // model resolved below with use-case-config priority
+      model: explicitModel,
       include_topics = true,
       include_moderation = false, // ignore comments that recieve a failing moderation score
     } = req.body;
+
+    // Resolve model: explicit API param > DB use-case config > env var > hardcoded fallback
+    let model: string;
+    let backupModel: string | null = null;
+    let fallbackModel: string | null = null;
+    let primaryProvider: string | null = null;
+    let backupProvider: string | null = null;
+    let fallbackProvider: string | null = null;
+    const DEFAULT_MODEL = "claude-sonnet-4-20250514";
+
+    if (explicitModel) {
+      model = explicitModel;
+      logger.info(`Using explicitly provided model: ${model}`);
+    } else {
+      try {
+        const config = await getModelConfig('delphi_report');
+        if (config?.primaryModel) {
+          model = config.primaryModel;
+          backupModel = config.backupModel ?? null;
+          fallbackModel = config.fallbackModel ?? null;
+          primaryProvider = config.primaryProvider ?? null;
+          backupProvider = config.backupProvider ?? null;
+          fallbackProvider = config.fallbackProvider ?? null;
+          logger.info(`Using model from polis_ai_use_case_config: ${model}` +
+            (backupModel ? ` (backup: ${backupModel})` : '') +
+            (fallbackModel ? ` (fallback: ${fallbackModel})` : ''));
+        } else {
+          model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
+          logger.info(`No delphi_report use-case config found, using env/default: ${model}`);
+        }
+      } catch (err: any) {
+        model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
+        logger.warn(`Failed to read delphi_report use-case config: ${err.message}, falling back to: ${model}`);
+      }
+    }
 
     // Validate required parameters
     if (!report_id && !conversation_id) {
@@ -83,6 +119,14 @@ export async function handle_POST_delphi_jobs(
         error: "Could not determine conversation ID",
       });
       return;
+    }
+
+    // Resolve deliberation_id from Agora for cross-system tracking
+    let deliberationId: string | null = null;
+    try {
+      deliberationId = await mapConversationToDeliberation(parseInt(String(zid), 10));
+    } catch (mapErr: any) {
+      logger.warn(`Could not resolve deliberation_id for zid=${zid}: ${mapErr.message}`);
     }
 
     // --- Deduplication: check for existing PENDING/PROCESSING jobs for the same report_id ---
@@ -111,6 +155,7 @@ export async function handle_POST_delphi_jobs(
             status: "success",
             message: `Existing ${existingJob.status} job found for this conversation`,
             job_id: existingJob.job_id,
+            deliberation_id: deliberationId || null,
             existing: true,
             job_status: existingJob.status,
           });
@@ -160,6 +205,11 @@ export async function handle_POST_delphi_jobs(
         stage: "REPORT",
         config: {
           model: model,
+          provider: primaryProvider,
+          backup_model: backupModel,
+          backup_provider: backupProvider,
+          fallback_model: fallbackModel,
+          fallback_provider: fallbackProvider,
           include_topics: include_topics,
         },
       });
@@ -183,6 +233,7 @@ export async function handle_POST_delphi_jobs(
       job_type: job_type,
       priority: parseInt(String(priority), 10),
       conversation_id: String(zid), // Using conversation_id
+      deliberation_id: deliberationId || "", // Resolved from Agora for cross-system tracking
       report_id: report_id, // Include report_id for proper S3 paths
       retry_count: 0,
       max_retries: 3,
@@ -219,10 +270,24 @@ export async function handle_POST_delphi_jobs(
         Item: jobItem,
       });
 
+      // Fire-and-forget AI usage logging for cost tracking
+      if (deliberationId) {
+        logAiUsage({
+          use_case: 'delphi_report',
+          model: model,
+          provider: primaryProvider || 'anthropic',
+          input_tokens: 0,
+          output_tokens: 0,
+          deliberation_id: deliberationId,
+          origin: 'polis',
+        }).catch(() => {}); // fire-and-forget, never throws
+      }
+
       // Return success with job ID
       res.json({
         status: "success",
         job_id: job_id,
+        deliberation_id: deliberationId || null,
       });
     } catch (dbError) {
       logger.error(
@@ -351,6 +416,7 @@ export async function handle_GET_delphi_jobs(
       jobType: item.job_type,
       priority: item.priority,
       conversationId: item.conversation_id,
+      deliberationId: item.deliberation_id || null,
       reportId: item.report_id || null,
       retryCount: item.retry_count || 0,
       maxRetries: item.max_retries || 3,
@@ -358,7 +424,15 @@ export async function handle_GET_delphi_jobs(
       startedAt: item.started_at || null,
       completedAt: item.completed_at || null,
       workerId: item.worker_id || null,
-      error: item.error || null,
+      error: item.error || (() => {
+        try {
+          if (item.job_results) {
+            const parsed = typeof item.job_results === 'string' ? JSON.parse(item.job_results) : item.job_results;
+            return parsed?.error || null;
+          }
+        } catch {}
+        return null;
+      })(),
       jobConfig: item.job_config || null,
     }));
     res.json({ status: "success", jobs, total: result.Count || jobs.length });

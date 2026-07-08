@@ -39,7 +39,7 @@ import {
   handle_GET_delphi_queue_stats,
 } from "./src/routes/delphi";
 import { handle_GET_delphi_visualizations } from "./src/routes/delphi/visualizations";
-import { handle_POST_delphi_jobs } from "./src/routes/delphi/jobs";
+import { handle_POST_delphi_jobs, handle_GET_delphi_jobs } from "./src/routes/delphi/jobs";
 import { handle_GET_delphi_reports } from "./src/routes/delphi/reports";
 import { handle_GET_delphi_hierarchy } from "./src/routes/delphi/hierarchy";
 import { handle_POST_delphi_batch_reports } from "./src/routes/delphi/batchReports";
@@ -1073,6 +1073,24 @@ helpersInitialized.then(
     app.get("/api/v3/delphi/queue-position", moveToBody, handle_GET_delphi_queue_position);
 
     app.get("/api/v3/delphi/queue-stats", handle_GET_delphi_queue_stats);
+
+    // Add GET endpoint for listing Delphi jobs
+    app.get(
+      "/api/v3/delphi/jobs",
+      moveToBody,
+      hybridAuth(assignToP),
+      function (req, res) {
+        try {
+          handle_GET_delphi_jobs(req, res);
+        } catch (err) {
+          res.json({
+            status: "error",
+            message: "Internal server error in job listing endpoint",
+            error: err instanceof Error ? err.message : "Unknown error",
+          });
+        }
+      }
+    );
 
     // Add POST endpoint for creating Delphi jobs
     app.post(

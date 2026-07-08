@@ -35,6 +35,10 @@ def main():
     parser.add_argument("--help", action="store_true", help="Show this help message")
     parser.add_argument('--include_moderation', action='store_true',
                         help='Include moderated comments in reports (flag: present=True, absent=False).')
+    parser.add_argument('--provider', type=str, default=None,
+                        help='LLM provider for topic naming (anthropic, openai, deepseek, google). Defaults to ANTHROPIC for backward compat.')
+    parser.add_argument('--model', type=str, default=None,
+                        help='Model name for topic naming. Falls back to env vars per provider.')
     parser.add_argument('--region', type=str, default='us-east-1', help='AWS region')
 
     args = parser.parse_args()
@@ -70,16 +74,32 @@ def main():
 
     print(f"{GREEN}Processing conversation {zid}...{NC}")
 
-    # Anthropic configuration for LLM-based topic naming
-    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
-    anthropic_model = os.environ.get("ANTHROPIC_MODEL")
-    if not anthropic_api_key:
-        print(f"{RED}Error: ANTHROPIC_API_KEY environment variable not set.{NC}")
+    # Resolve provider and model for LLM topic naming
+    provider_type = getattr(args, 'provider', None) or os.environ.get("LLM_PROVIDER") or "anthropic"
+
+    if provider_type == "anthropic":
+        model_name = getattr(args, 'model', None) or os.environ.get("ANTHROPIC_MODEL")
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+    elif provider_type == "openai":
+        model_name = getattr(args, 'model', None) or os.environ.get("OPENAI_MODEL")
+        api_key = os.environ.get("OPENAI_API_KEY")
+    elif provider_type == "deepseek":
+        model_name = getattr(args, 'model', None) or os.environ.get("DEEPSEEK_MODEL")
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+    elif provider_type in ("google", "gemini"):
+        model_name = getattr(args, 'model', None) or os.environ.get("GOOGLE_MODEL") or os.environ.get("GEMINI_MODEL")
+        api_key = os.environ.get("GOOGLE_GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    else:
+        print(f"{RED}Error: Unsupported provider '{provider_type}'{NC}")
         sys.exit(1)
-    if not anthropic_model:
-        print(f"{RED}Error: ANTHROPIC_MODEL environment variable not set.{NC}")
+
+    if not model_name:
+        print(f"{RED}Error: No model specified for provider '{provider_type}'{NC}")
         sys.exit(1)
-    print(f"{YELLOW}Using Anthropic model for topic naming: {anthropic_model}{NC}")
+    if not api_key:
+        print(f"{RED}Error: API key not set for provider '{provider_type}'{NC}")
+        sys.exit(1)
+    print(f"{YELLOW}Using {provider_type} model for topic naming: {model_name}{NC}")
 
     # Set up environment for the pipeline
     app_path = os.environ.get('DELPHI_APP_PATH', '/app')
@@ -120,7 +140,9 @@ def main():
     umap_command = [
         "python", f"{app_path}/umap_narrative/run_pipeline.py",
         f"--zid={zid}",
-        "--enable-llm-topic-naming"
+        "--enable-llm-topic-naming",
+        f"--provider={provider_type}",
+        f"--model={model_name}"
     ]
     if args.include_moderation:
         umap_command.append("--include_moderation")

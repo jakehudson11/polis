@@ -4,6 +4,7 @@ import { DynamoDB } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocument } from "@aws-sdk/lib-dynamodb";
 import logger from "../../utils/logger";
 import { getZidFromReport } from "../../utils/parameter";
+import { mapConversationToDeliberation } from "../../utils/aiUsageLogger";
 import Config from "../../config";
 
 // Initialize DynamoDB client
@@ -59,6 +60,14 @@ export async function handle_POST_delphi_batch_reports(
       `Generating batch reports for conversation_id: ${conversation_id}`
     );
 
+    // Resolve deliberation_id from Agora for cross-system tracking
+    let deliberationId: string | null = null;
+    try {
+      deliberationId = await mapConversationToDeliberation(zid);
+    } catch (mapErr: any) {
+      logger.warn(`Could not resolve deliberation_id for zid=${zid}: ${mapErr.message}`);
+    }
+
     // Model parameter - must be explicitly set
     // eslint-disable-next-line no-restricted-properties
     const model = (req.body.model as string) || process.env.ANTHROPIC_MODEL;
@@ -103,6 +112,7 @@ export async function handle_POST_delphi_batch_reports(
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       conversation_id: conversation_id,
+      deliberation_id: deliberationId || "", // Resolved from Agora for cross-system tracking
       report_id: report_id,
       job_type: "CREATE_NARRATIVE_BATCH",
       job_config: JSON.stringify(jobConfig),
@@ -149,6 +159,7 @@ export async function handle_POST_delphi_batch_reports(
       report_id: report_id,
       job_id: job_id,
       batch_id: job_id, // Include batch_id field for frontend compatibility
+      deliberation_id: deliberationId || null,
       model: model,
       max_batch_size: max_batch_size,
       no_cache: no_cache,

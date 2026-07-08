@@ -202,7 +202,11 @@ class PolisConverter:
 class BatchReportGenerator:
     """Generate batch reports for Polis conversations."""
 
-    def __init__(self, conversation_id, model=None, no_cache=False, max_batch_size=20, job_id=None, layers=None, include_moderation=False):
+    def __init__(self, conversation_id, model=None, provider=None,
+                 backup_model=None, backup_provider=None,
+                 fallback_model=None, fallback_provider=None,
+                 no_cache=False, max_batch_size=20, job_id=None, layers=None,
+                 include_moderation=False):
         """Initialize the batch report generator."""
         self.conversation_id = str(conversation_id)
         if not model:
@@ -210,6 +214,11 @@ class BatchReportGenerator:
             if not model:
                 raise ValueError("Model must be specified via --model argument or ANTHROPIC_MODEL environment variable")
         self.model = model
+        self.provider = provider or os.environ.get("NARRATIVE_BATCH_PROVIDER") or "anthropic"
+        self.backup_model = backup_model or os.environ.get("NARRATIVE_BATCH_BACKUP_MODEL") or None
+        self.backup_provider = backup_provider or os.environ.get("NARRATIVE_BATCH_BACKUP_PROVIDER") or None
+        self.fallback_model = fallback_model or os.environ.get("NARRATIVE_BATCH_FALLBACK_MODEL") or None
+        self.fallback_provider = fallback_provider or os.environ.get("NARRATIVE_BATCH_FALLBACK_PROVIDER") or None
         self.no_cache = no_cache
         self.max_batch_size = max_batch_size
         self.layers = layers  # List of layers to process, or None for all layers
@@ -1804,32 +1813,135 @@ class BatchReportGenerator:
             logger.error(traceback.format_exc())
             return None
 
-    async def submit_batch(self):
-        """Prepare and process a batch of topic report requests using Anthropic's Batch API."""
-        logger.info("=== Starting batch submission process ===")
+    async def _submit_sequential(self, provider_type: str, model_name: str, batch_requests: list) -> bool:
+        """
+        Process batch requests sequentially for providers without a Batch API.
+        Stores results directly in DynamoDB via NarrativeReportService.
+        Returns True on success, False on failure.
+        """
+        from umap_narrative.llm_factory_constructor.model_provider import get_model_provider
 
-        # Prepare batch requests
+        logger.info(f"Starting sequential processing with {provider_type}/{model_name} for {len(batch_requests)} requests")
+
         try:
-            logger.info("Preparing batch requests for topics...")
+            provider = get_model_provider(provider_type=provider_type, model_name=model_name)
+        except Exception as e:
+            logger.error(f"Failed to initialize {provider_type} provider: {e}")
+            return False
+
+        success_count = 0
+        fail_count = 0
+
+        for i, request in enumerate(batch_requests):
+            try:
+                system_content = request.get('system', '')
+                user_content = ''
+                if 'messages' in request and len(request.get('messages', [])) > 0:
+                    user_content = request.get('messages', [])[0].get('content', '')
+
+                if not user_content:
+                    logger.warning(f"Empty user prompt for request {i}, skipping")
+                    continue
+
+                response = provider.get_response(system_content, user_content)
+
+                # Extract metadata from the request
+                metadata = request.get('metadata', {})
+                section_name = metadata.get('section_name', f'unknown_section_{i}')
+                topic_name = metadata.get('topic_name', 'unknown_topic')
+
+                # Store result in DynamoDB using NarrativeReportService
+                if self.report_id:
+                    self.report_storage.store_report(
+                        report_id=self.report_id,
+                        section=section_name,
+                        model=model_name,
+                        report_data=response,
+                        job_id=self.job_id,
+                        metadata={
+                            'section_name': section_name,
+                            'topic_name': topic_name,
+                            'conversation_id': self.conversation_id,
+                            'cluster_id': str(metadata.get('cluster_id', '')),
+                            'provider': provider_type,
+                            'model': model_name,
+                        }
+                    )
+                    success_count += 1
+                else:
+                    logger.warning(f"No report_id available, skipping storage for {section_name}")
+                    success_count += 1  # Still count as success — response was received
+
+                if success_count % 10 == 0:
+                    logger.info(f"Sequential progress: {success_count}/{len(batch_requests)}")
+
+            except Exception as e:
+                fail_count += 1
+                logger.error(f"Sequential request {i} failed: {e}")
+                # Continue with next request — don't abort entire batch
+
+        logger.info(f"Sequential processing complete: {success_count} succeeded, {fail_count} failed")
+        return fail_count == 0  # True only if ALL succeeded
+
+    async def submit_batch(self):
+        """Prepare and process a batch of topic report requests with provider cascading."""
+        logger.info(f"=== Starting batch submission with provider={self.provider} ===")
+
+        # Prepare batch requests (provider-agnostic)
+        try:
             batch_requests = await self.prepare_batch_requests()
-
             if not batch_requests:
-                logger.error("No batch requests to submit - prepare_batch_requests returned empty list")
+                logger.error("No batch requests to submit")
                 return None
-
             logger.info(f"Successfully prepared {len(batch_requests)} batch requests")
         except Exception as e:
             logger.error(f"Critical error during batch request preparation: {str(e)}")
-            logger.error(traceback.format_exc())
             return None
 
+        # Build provider cascade: primary → backup → fallback
+        tiers = []
+        if self.provider and self.model:
+            tiers.append((self.provider, self.model))
+        if self.backup_provider and self.backup_model:
+            tiers.append((self.backup_provider, self.backup_model))
+        if self.fallback_provider and self.fallback_model:
+            tiers.append((self.fallback_provider, self.fallback_model))
+
+        if not tiers:
+            logger.error("No provider/model tiers configured")
+            return None
+
+        # Try each tier
+        for prov, mod in tiers:
+            logger.info(f"Trying provider tier: {prov}/{mod}")
+            try:
+                if prov == "anthropic":
+                    result = await self._submit_anthropic_batch(mod, batch_requests)
+                else:
+                    result = await self._submit_sequential(prov, mod, batch_requests)
+
+                if result:
+                    logger.info(f"Provider tier {prov}/{mod} succeeded")
+                    return result
+                else:
+                    logger.warning(f"Provider tier {prov}/{mod} returned failure, trying next tier")
+                    continue
+            except Exception as e:
+                logger.error(f"Provider tier {prov}/{mod} threw exception: {e}")
+                logger.error(traceback.format_exc())
+                continue
+
+        logger.error(f"All provider tiers failed: {tiers}")
+        return None
+
+    async def _submit_anthropic_batch(self, model_name, batch_requests):
+        """Submit batch requests to Anthropic's Batch API."""
         # Log job information
         logger.info(f"Processing batch of {len(batch_requests)} requests for conversation {self.conversation_id}")
         if self.job_id:
             logger.info(f"Job ID: {self.job_id}")
         if self.report_id:
             logger.info(f"Report ID: {self.report_id}")
-
 
         # Validate API key presence
         anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -1903,9 +2015,9 @@ class BatchReportGenerator:
                     else:
                         # Legacy format or no job_id in section name
                         custom_id = f"{self.conversation_id}_{section_name}"
-                    
+
                     safe_custom_id = re.sub(r'[^a-zA-Z0-9_-]', '_', custom_id)
-                    
+
                     # Debug logging to trace the custom_id construction
                     logger.info(f"Custom ID construction: conversation_id={self.conversation_id}, section_name='{section_name}', custom_id='{custom_id}', safe_custom_id='{safe_custom_id}'")
 
@@ -1943,7 +2055,7 @@ class BatchReportGenerator:
                     formatted_request = {
                         "custom_id": safe_custom_id,
                         "params": {
-                            "model": self.model,
+                            "model": model_name,
                             "max_tokens": request.get('max_tokens', 4000),
                             "system": system_content,
                             "messages": [user_message]
@@ -1956,7 +2068,7 @@ class BatchReportGenerator:
 
                 # Debug: log the first request structure (without full content)
                 if formatted_batch_requests:
-                    # CRITICAL BUG FIX: Must use deepcopy here! 
+                    # CRITICAL BUG FIX: Must use deepcopy here!
                     # Using shallow copy causes the debug truncation to modify the actual request sent to Anthropic
                     # This was causing the first batch item to fail with "Report data is not in the expected JSON format"
                     import copy
@@ -2019,7 +2131,7 @@ class BatchReportGenerator:
             if self.job_id:
                 logger.info(f"Updating job {self.job_id} with batch information in DynamoDB...")
                 try:
-                    job_table = self.dynamodb.Table('Delphi_JobQueue') 
+                    job_table = self.dynamodb.Table('Delphi_JobQueue')
 
                     # Check if the table exists
                     try:
@@ -2050,7 +2162,7 @@ class BatchReportGenerator:
                         ExpressionAttributeValues={
                             ':batch_id': batch_id_str,
                             ':job_status': 'PROCESSING',  # Set job status to PROCESSING so poller knows to check batch status
-                            ':model': self.model  # Store the model name
+                            ':model': model_name  # Store the model name
                         },
                         ReturnValues="UPDATED_NEW"
                     )
@@ -2116,7 +2228,7 @@ class BatchReportGenerator:
             return batch.id
 
         except Exception as e:
-            logger.error(f"Unhandled error in submit_batch: {str(e)}")
+            logger.error(f"Unhandled error in _submit_anthropic_batch: {str(e)}")
             logger.error(traceback.format_exc())
 
             # Try to update job status in DynamoDB
@@ -2145,6 +2257,16 @@ async def main():
                         help='Conversation ID to process')
     parser.add_argument('--model', type=str, default=None,
                         help='LLM model to use (defaults to ANTHROPIC_MODEL env var)')
+    parser.add_argument('--provider', type=str, default=None,
+                        help='LLM provider (anthropic, openai, deepseek, google). Defaults to anthropic.')
+    parser.add_argument('--backup-model', type=str, default=None,
+                        help='Backup model if primary fails')
+    parser.add_argument('--backup-provider', type=str, default=None,
+                        help='Backup provider if primary fails')
+    parser.add_argument('--fallback-model', type=str, default=None,
+                        help='Fallback model if backup also fails')
+    parser.add_argument('--fallback-provider', type=str, default=None,
+                        help='Fallback provider if backup also fails')
     parser.add_argument('--no-cache', action='store_true',
                         help='Ignore cached report data')
     parser.add_argument('--max-batch-size', type=int, default=5,
@@ -2192,6 +2314,11 @@ async def main():
     generator = BatchReportGenerator(
         conversation_id=args.conversation_id,
         model=args.model,
+        provider=args.provider,
+        backup_model=args.backup_model,
+        backup_provider=args.backup_provider,
+        fallback_model=args.fallback_model,
+        fallback_provider=args.fallback_provider,
         no_cache=args.no_cache,
         max_batch_size=args.max_batch_size,
         job_id=job_id,

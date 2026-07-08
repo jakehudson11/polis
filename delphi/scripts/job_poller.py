@@ -717,6 +717,11 @@ class JobProcessor:
                 max_batch_size = 20
 
         no_cache = self._coerce_bool(report_stage_config.get('no_cache'), default=False)
+        provider = report_stage_config.get('provider') or os.environ.get('NARRATIVE_BATCH_PROVIDER') or 'anthropic'
+        backup_model = report_stage_config.get('backup_model') or None
+        backup_provider = report_stage_config.get('backup_provider') or None
+        fallback_model = report_stage_config.get('fallback_model') or None
+        fallback_provider = report_stage_config.get('fallback_provider') or None
 
         now_iso = datetime.now(timezone.utc).isoformat()
         parent_job_id = parent_job.get('job_id', '')
@@ -731,6 +736,11 @@ class JobProcessor:
                     'stage': 'CREATE_NARRATIVE_BATCH_CONFIG_STAGE',
                     'config': {
                         'model': model,
+                        'provider': provider,
+                        'backup_model': backup_model,
+                        'backup_provider': backup_provider,
+                        'fallback_model': fallback_model,
+                        'fallback_provider': fallback_provider,
                         'max_batch_size': max_batch_size,
                         'no_cache': no_cache,
                         'report_id': report_id,
@@ -743,6 +753,11 @@ class JobProcessor:
 
         env_blob = {
             'NARRATIVE_BATCH_MODEL': str(model),
+            'NARRATIVE_BATCH_PROVIDER': str(provider),
+            'NARRATIVE_BATCH_BACKUP_MODEL': str(backup_model) if backup_model else '',
+            'NARRATIVE_BATCH_BACKUP_PROVIDER': str(backup_provider) if backup_provider else '',
+            'NARRATIVE_BATCH_FALLBACK_MODEL': str(fallback_model) if fallback_model else '',
+            'NARRATIVE_BATCH_FALLBACK_PROVIDER': str(fallback_provider) if fallback_provider else '',
             'NARRATIVE_BATCH_MAX_SIZE': str(max_batch_size),
             'NARRATIVE_BATCH_NO_CACHE': '1' if no_cache else '0',
         }
@@ -1178,13 +1193,26 @@ class JobProcessor:
                     default=include_moderation,
                 )
 
+                provider = stage_cfg.get('provider') or os.environ.get('NARRATIVE_BATCH_PROVIDER') or 'anthropic'
+                backup_model = stage_cfg.get('backup_model') or None
+                backup_provider = stage_cfg.get('backup_provider') or None
+                fallback_model = stage_cfg.get('fallback_model') or None
+                fallback_provider = stage_cfg.get('fallback_provider') or None
+
                 cmd = [
                     'python',
                     f'{app_path}/umap_narrative/801_narrative_report_batch.py',
                     f'--conversation_id={conversation_id}',
                     f'--model={model}',
+                    f'--provider={provider}',
                     f'--max-batch-size={str(max_batch_size)}',
                 ]
+                if backup_model and backup_provider:
+                    cmd.append(f'--backup-model={backup_model}')
+                    cmd.append(f'--backup-provider={backup_provider}')
+                if fallback_model and fallback_provider:
+                    cmd.append(f'--fallback-model={fallback_model}')
+                    cmd.append(f'--fallback-provider={fallback_provider}')
                 if include_moderation:
                     cmd.append('--include_moderation')
                 if no_cache:
@@ -1202,6 +1230,15 @@ class JobProcessor:
                 if report_id:
                     cmd.append(f'--rid={report_id}')
                     self.update_job_logs(job, {'level': 'INFO', 'message': f"Passing report_id {report_id} to run_delphi.py"})
+                # Check for REPORT stage config with provider/model info
+                report_stage_cfg = self._get_stage_config(job_config, 'REPORT')
+                if report_stage_cfg:
+                    report_provider = report_stage_cfg.get('provider')
+                    report_model_from_cfg = report_stage_cfg.get('model')
+                    if report_provider:
+                        cmd.append(f'--provider={report_provider}')
+                    if report_model_from_cfg:
+                        cmd.append(f'--model={report_model_from_cfg}')
 
 
             # 2. Execute the command and stream logs to prevent deadlocks
@@ -1210,6 +1247,20 @@ class JobProcessor:
             env = os.environ.copy()
             env['DELPHI_JOB_ID'] = job_id
             env['DELPHI_REPORT_ID'] = str(job.get('report_id') or conversation_id)
+            # Set provider/model env vars from REPORT stage config for FULL_PIPELINE subprocess
+            report_stage_cfg_for_env = self._get_stage_config(job_config, 'REPORT')
+            if report_stage_cfg_for_env:
+                provider_for_env = report_stage_cfg_for_env.get('provider') or 'anthropic'
+                model_for_env = report_stage_cfg_for_env.get('model') or os.environ.get('ANTHROPIC_MODEL') or 'claude-sonnet-4-20250514'
+                env['LLM_PROVIDER'] = provider_for_env
+                if provider_for_env == 'anthropic':
+                    env['ANTHROPIC_MODEL'] = model_for_env
+                elif provider_for_env == 'openai':
+                    env['OPENAI_MODEL'] = model_for_env
+                elif provider_for_env == 'deepseek':
+                    env['DEEPSEEK_MODEL'] = model_for_env
+                elif provider_for_env in ('google', 'gemini'):
+                    env['GOOGLE_MODEL'] = model_for_env
             
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True, env=env)
 
