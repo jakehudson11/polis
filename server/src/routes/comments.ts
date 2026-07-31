@@ -21,6 +21,7 @@ import {
   getComment,
   getComments,
   getCommentsCount,
+  getNumberOfCommentsRemaining,
   translateAndStoreComment,
 } from "../comment";
 import {
@@ -763,6 +764,16 @@ async function handle_GET_nextComment(
       const response: CommentOptions = {};
       if (!_.isUndefined(pid)) {
         response.currentPid = pid;
+      }
+      // Include total so client can distinguish "no statements" from "all caught up"
+      try {
+        const remainingRows = await getNumberOfCommentsRemaining(req.p.zid, pid);
+        if (remainingRows && remainingRows.length > 0) {
+          (response as any).total = Number(remainingRows[0].total);
+          (response as any).remaining = Number(remainingRows[0].remaining);
+        }
+      } catch {
+        // best effort — if the query fails, the client falls back to hasNoStatements
       }
       res.status(200).json(response);
     }

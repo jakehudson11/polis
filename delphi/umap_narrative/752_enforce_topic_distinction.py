@@ -30,7 +30,8 @@ import boto3
 from boto3.dynamodb.conditions import Key
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from umap_narrative.llm_factory_constructor import get_model_provider
+from umap_narrative.llm_factory_constructor import get_model_provider, get_model_provider_with_cascade, AgoraProxyProvider
+from umap_narrative.llm_factory_constructor.model_provider import log_ai_usage
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +237,8 @@ def enforce_topic_distinction(
     conversation_id: str,
     dynamodb_resource=None,
     similarity_threshold: float = 0.75,
-    anthropic_model: str = None,
+    model_name: str = None,
+    provider_type: str = None,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     """Check and revise topic names within each layer for distinctness.
@@ -260,9 +262,34 @@ def enforce_topic_distinction(
             kwargs["endpoint_url"] = endpoint
         dynamodb_resource = boto3.resource("dynamodb", **kwargs)
 
-    anthropic_model = anthropic_model or os.environ.get("ANTHROPIC_MODEL")
-    if not anthropic_model:
-        raise ValueError("anthropic_model must be provided or ANTHROPIC_MODEL env var set")
+    model_name = model_name or os.environ.get("ANTHROPIC_MODEL")
+    if not model_name:
+        raise ValueError("model_name must be provided or ANTHROPIC_MODEL env var set")
+    
+    provider_type = provider_type or os.environ.get("LLM_PROVIDER") or os.environ.get("NARRATIVE_BATCH_PROVIDER") or "anthropic"
+    
+    if provider_type.lower() == "agora":
+        # When LLM_PROVIDER is 'agora', route through AgoraProxyProvider directly.
+        # Agora's backend handles cascade/fallback — Delphi does NOT try providers locally.
+        primary_provider = os.environ.get("LLM_PRIMARY_PROVIDER") or os.environ.get("LLM_PROVIDER_ACTUAL") or "anthropic"
+        deliberation_id = os.environ.get("DELIBERATION_ID") or os.environ.get("DELPHI_DELIBERATION_ID") or None
+        
+        provider = AgoraProxyProvider(
+            model=model_name,
+            provider=primary_provider,
+            backup_model=os.environ.get("LLM_BACKUP_MODEL") or None,
+            backup_provider=os.environ.get("LLM_BACKUP_PROVIDER") or None,
+            fallback_model=os.environ.get("LLM_FALLBACK_MODEL") or None,
+            fallback_provider=os.environ.get("LLM_FALLBACK_PROVIDER") or None,
+            use_case='delphi_report',
+            deliberation_id=deliberation_id,
+        )
+    else:
+        config = {
+            'provider': provider_type,
+            'model': model_name,
+        }
+        provider = get_model_provider_with_cascade(config)
 
     st_model_name = os.environ.get("SENTENCE_TRANSFORMER_MODEL", "all-MiniLM-L6-v2")
     logger.info("Loading SentenceTransformer model: %s", st_model_name)
@@ -283,8 +310,6 @@ def enforce_topic_distinction(
         "topics_revised": 0,
         "revisions": {},
     }
-
-    provider = get_model_provider("anthropic", model_name=anthropic_model)
     topic_table = dynamodb_resource.Table("Delphi_CommentClustersLLMTopicNames")
 
     for layer_id in sorted(layers.keys()):
@@ -331,6 +356,23 @@ def enforce_topic_distinction(
         except Exception:
             logger.warning("Layer %d: LLM call failed, skipping", layer_id, exc_info=True)
             continue
+
+        # Log AI usage with estimated token counts
+        try:
+            prompt_text = "You are a topic-naming specialist. Respond with ONLY valid JSON." + prompt
+            estimated_input = max(1, len(prompt_text) // 4)
+            estimated_output = max(1, len(llm_response) // 4) if llm_response else 1
+            deliberation_id = os.environ.get('DELPHI_DELIBERATION_ID', '')
+            log_ai_usage(
+                use_case='delphi_report',
+                model=anthropic_model,
+                provider='anthropic',
+                input_tokens=estimated_input,
+                output_tokens=estimated_output,
+                deliberation_id=deliberation_id,
+            )
+        except Exception:
+            logger.warning("Layer %d: failed to log AI usage", layer_id, exc_info=True)
 
         parsed = _parse_llm_response(llm_response)
         if not parsed:
@@ -414,12 +456,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--dry-run", action="store_true", help="Compute and log revisions without writing to DynamoDB")
     parser.add_argument("--model", default=None, help="Anthropic model name (overrides ANTHROPIC_MODEL env var)")
+    parser.add_argument("--provider", type=str, default=None, help="Provider name (default: anthropic or LLM_PROVIDER env)")
     args = parser.parse_args()
 
     result = enforce_topic_distinction(
         conversation_id=args.conversation_id,
         similarity_threshold=args.similarity_threshold,
-        anthropic_model=args.model,
+        model_name=args.model,
+        provider_type=args.provider,
         dry_run=args.dry_run,
     )
     print(json.dumps(result, indent=2))

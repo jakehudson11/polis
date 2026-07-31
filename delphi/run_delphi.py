@@ -35,10 +35,6 @@ def main():
     parser.add_argument("--help", action="store_true", help="Show this help message")
     parser.add_argument('--include_moderation', action='store_true',
                         help='Include moderated comments in reports (flag: present=True, absent=False).')
-    parser.add_argument('--provider', type=str, default=None,
-                        help='LLM provider for topic naming (anthropic, openai, deepseek, google). Defaults to ANTHROPIC for backward compat.')
-    parser.add_argument('--model', type=str, default=None,
-                        help='Model name for topic naming. Falls back to env vars per provider.')
     parser.add_argument('--region', type=str, default='us-east-1', help='AWS region')
 
     args = parser.parse_args()
@@ -71,35 +67,31 @@ def main():
         print(f"{RED}Data reset failed with exit code {reset_process.returncode}. Aborting pipeline.{NC}")
         sys.exit(reset_process.returncode)
     print(f"{GREEN}Data reset complete.{NC}")
+    print(f"[PROGRESS: 5] Data reset complete — starting math pipeline")
 
     print(f"{GREEN}Processing conversation {zid}...{NC}")
 
     # Resolve provider and model for LLM topic naming
-    provider_type = getattr(args, 'provider', None) or os.environ.get("LLM_PROVIDER") or "anthropic"
-
-    if provider_type == "anthropic":
-        model_name = getattr(args, 'model', None) or os.environ.get("ANTHROPIC_MODEL")
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-    elif provider_type == "openai":
-        model_name = getattr(args, 'model', None) or os.environ.get("OPENAI_MODEL")
-        api_key = os.environ.get("OPENAI_API_KEY")
-    elif provider_type == "deepseek":
-        model_name = getattr(args, 'model', None) or os.environ.get("DEEPSEEK_MODEL")
-        api_key = os.environ.get("DEEPSEEK_API_KEY")
-    elif provider_type in ("google", "gemini"):
-        model_name = getattr(args, 'model', None) or os.environ.get("GOOGLE_MODEL") or os.environ.get("GEMINI_MODEL")
-        api_key = os.environ.get("GOOGLE_GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    else:
-        print(f"{RED}Error: Unsupported provider '{provider_type}'{NC}")
-        sys.exit(1)
-
+    provider_type = os.environ.get("LLM_PROVIDER") or os.environ.get("NARRATIVE_BATCH_PROVIDER") or "anthropic"
+    model_name = os.environ.get("LLM_MODEL") or os.environ.get("ANTHROPIC_MODEL")
+    
     if not model_name:
-        print(f"{RED}Error: No model specified for provider '{provider_type}'{NC}")
-        sys.exit(1)
-    if not api_key:
-        print(f"{RED}Error: API key not set for provider '{provider_type}'{NC}")
-        sys.exit(1)
-    print(f"{YELLOW}Using {provider_type} model for topic naming: {model_name}{NC}")
+        print(f"{YELLOW}No model specified via LLM_MODEL or ANTHROPIC_MODEL env. Skipping LLM topic naming.{NC}")
+        model_name = None
+        api_key = None
+    else:
+        # Resolve API key dynamically for any provider
+        provider_upper = provider_type.upper().replace('.', '_')
+        api_key = (
+            os.environ.get(f"{provider_upper}_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")
+        )
+        if not api_key:
+            print(f"{YELLOW}No API key found for provider '{provider_type}'. Skipping LLM topic naming.{NC}")
+            model_name = None
+        else:
+            print(f"{YELLOW}Using {provider_type} model for topic naming: {model_name}{NC}")
 
     # Set up environment for the pipeline
     app_path = os.environ.get('DELPHI_APP_PATH', '/app')
@@ -128,6 +120,7 @@ def main():
     if batch_size_arg:
         math_command.append(batch_size_arg)
 
+    print(f"[PROGRESS: 10] Math pipeline running — performing PCA on vote data")
     math_process = subprocess.run(math_command)
     math_exit_code = math_process.returncode
 
@@ -135,14 +128,13 @@ def main():
         print(f"{RED}Math pipeline failed with exit code {math_exit_code}{NC}")
         sys.exit(math_exit_code)
 
+    print(f"[PROGRESS: 30] Math complete — running UMAP narrative pipeline (group analysis)")
     # Run the UMAP narrative pipeline
     print(f"{GREEN}Running UMAP narrative pipeline...{NC}")
     umap_command = [
         "python", f"{app_path}/umap_narrative/run_pipeline.py",
         f"--zid={zid}",
-        "--enable-llm-topic-naming",
-        f"--provider={provider_type}",
-        f"--model={model_name}"
+        "--enable-llm-topic-naming"
     ]
     if args.include_moderation:
         umap_command.append("--include_moderation")
@@ -152,8 +144,10 @@ def main():
     pipeline_process = subprocess.run(umap_command)
     pipeline_exit_code = pipeline_process.returncode
 
+    print(f"[PROGRESS: 55] UMAP pipeline complete — group analysis done, calculating metrics")
     # Calculate and store comment extremity values
     print(f"{GREEN}Calculating comment extremity values...{NC}")
+    print(f"[PROGRESS: 65] Calculating comment extremity values")
     extremity_command = [
         "python", f"{app_path}/umap_narrative/501_calculate_comment_extremity.py",
         f"--zid={zid}",
@@ -173,6 +167,7 @@ def main():
         print("Continuing with priority calculation...")
 
     # Calculate comment priorities using group-based extremity
+    print(f"[PROGRESS: 75] Calculating comment priorities")
     print(f"{GREEN}Calculating comment priorities with group-based extremity...{NC}")
     priority_command = [
         "python", f"{app_path}/umap_narrative/502_calculate_priorities.py",
@@ -189,6 +184,7 @@ def main():
         print("Continuing with visualization...")
 
     if pipeline_exit_code == 0:
+        print(f"[PROGRESS: 85] Generating data visualization plots")
         print(f"{YELLOW}Creating visualizations with datamapplot...{NC}")
 
         # Create output directory
@@ -297,6 +293,7 @@ def main():
     else:
         print(f"{GREEN}Topic distinction enforcement complete.{NC}")
 
+    print(f"[PROGRESS: 95] Pipeline complete — report generation in progress")
     # Success (math pipeline already exited non-zero earlier if it failed)
     sys.exit(0)
 

@@ -164,9 +164,14 @@ export async function callWithFallback<T>(options: {
   fallbackProvider?: string;
   primaryFn: (model: string, provider: string) => Promise<T>;
   backupFn?: (model: string, provider: string) => Promise<T>;
+  /** Per-attempt timeout (ms) passed through to retryWithBackoff. */
   timeout?: number;
   maxRetries?: number;
   priority?: number;
+  /** Wall-clock timeout (ms) for the entire fallback chain (primary +
+   *  backup + fallback tiers combined).  Defaults to 180 s to stay
+   *  under the Agora proxy timeout. */
+  totalTimeoutMs?: number;
 }): Promise<FallbackResult<T>> {
   const {
     label,
@@ -181,94 +186,110 @@ export async function callWithFallback<T>(options: {
     timeout,
     maxRetries,
     priority,
+    totalTimeoutMs = 180_000,
   } = options;
 
-  const primaryBreaker = getCircuitBreaker(primaryProvider);
-  let primaryError: unknown;
-  let backupError: unknown;
+  async function runFallbackChain(): Promise<FallbackResult<T>> {
+    const primaryBreaker = getCircuitBreaker(primaryProvider);
+    let primaryError: unknown;
+    let backupError: unknown;
 
-  const startTime = Date.now();
-  try {
-    const result = await enqueueAiCall(
-      primaryProvider,
-      () => retryWithBackoff(
-        () => primaryBreaker.fire(() => primaryFn(primaryModel, primaryProvider)) as Promise<T>,
-        { maxRetries: maxRetries ?? 2, timeout },
-      ),
-      priority,
-    );
-    logMetrics(primaryProvider, Date.now() - startTime, true);
-    return { result, usedModel: primaryModel, usedProvider: primaryProvider, usedTier: 'primary' };
-  } catch (err) {
-    logMetrics(primaryProvider, Date.now() - startTime, false, classifyError(err));
-    primaryError = err;
-    console.warn(
-      `[ai-fallback] Primary ${primaryProvider}/${primaryModel} failed for ${label}, trying backup`
-    );
-  }
-
-  if (!backupModel || !backupProvider) {
-    throw primaryError;
-  }
-
-  const backupBreaker = getCircuitBreaker(backupProvider);
-  const backupCall = backupFn ?? primaryFn;
-
-  const backupStart = Date.now();
-  try {
-    const result = await enqueueAiCall(
-      backupProvider,
-      () => retryWithBackoff(
-        () => backupBreaker.fire(() => backupCall(backupModel, backupProvider)) as Promise<T>,
-        { maxRetries: 3, timeout },
-      ),
-      priority,
-    );
-    logMetrics(backupProvider, Date.now() - backupStart, true);
-    return { result, usedModel: backupModel, usedProvider: backupProvider, usedTier: 'backup' };
-  } catch (err) {
-    backupError = err;
-    logMetrics(backupProvider, Date.now() - backupStart, false, classifyError(err));
-    console.error(
-      `[ai-fallback] Backup ${backupProvider}/${backupModel} also failed for ${label}`
-    );
-  }
-
-  // ─── Fallback tier ──────────────────────────────────────
-  if (fallbackModel && fallbackProvider) {
-    console.warn(
-      `[ai-fallback] Both primary and backup failed for ${label}, trying fallback ${fallbackProvider}/${fallbackModel}`
-    );
-
-    const fallbackBreaker = getCircuitBreaker(fallbackProvider);
-    const fallbackStart = Date.now();
+    const startTime = Date.now();
     try {
-      const fallbackCallFn = backupCall ?? primaryFn;
       const result = await enqueueAiCall(
-        fallbackProvider,
+        primaryProvider,
         () => retryWithBackoff(
-          () => fallbackBreaker.fire(() => fallbackCallFn(fallbackModel!, fallbackProvider!)) as Promise<T>,
+          () => primaryBreaker.fire(() => primaryFn(primaryModel, primaryProvider)) as Promise<T>,
+          { maxRetries: maxRetries ?? 2, timeout },
+        ),
+        priority,
+      );
+      logMetrics(primaryProvider, Date.now() - startTime, true);
+      return { result, usedModel: primaryModel, usedProvider: primaryProvider, usedTier: 'primary' };
+    } catch (err) {
+      logMetrics(primaryProvider, Date.now() - startTime, false, classifyError(err));
+      primaryError = err;
+      console.warn(
+        `[ai-fallback] Primary ${primaryProvider}/${primaryModel} failed for ${label}, trying backup`
+      );
+    }
+
+    if (!backupModel || !backupProvider) {
+      throw primaryError;
+    }
+
+    const backupBreaker = getCircuitBreaker(backupProvider);
+    const backupCall = backupFn ?? primaryFn;
+
+    const backupStart = Date.now();
+    try {
+      const result = await enqueueAiCall(
+        backupProvider,
+        () => retryWithBackoff(
+          () => backupBreaker.fire(() => backupCall(backupModel, backupProvider)) as Promise<T>,
           { maxRetries: 3, timeout },
         ),
         priority,
       );
-      logMetrics(fallbackProvider, Date.now() - fallbackStart, true);
-      console.log(`[ai-fallback] Fallback ${fallbackProvider}/${fallbackModel} succeeded for ${label}`);
-      return { result, usedModel: fallbackModel!, usedProvider: fallbackProvider!, usedTier: 'fallback' };
-    } catch (fallbackError) {
-      logMetrics(fallbackProvider, Date.now() - fallbackStart, false, classifyError(fallbackError));
+      logMetrics(backupProvider, Date.now() - backupStart, true);
+      return { result, usedModel: backupModel, usedProvider: backupProvider, usedTier: 'backup' };
+    } catch (err) {
+      backupError = err;
+      logMetrics(backupProvider, Date.now() - backupStart, false, classifyError(err));
       console.error(
-        `[ai-fallback] Fallback ${fallbackProvider}/${fallbackModel} also failed for ${label}`
+        `[ai-fallback] Backup ${backupProvider}/${backupModel} also failed for ${label}`
       );
     }
+
+    // ─── Fallback tier ──────────────────────────────────────
+    if (fallbackModel && fallbackProvider) {
+      console.warn(
+        `[ai-fallback] Both primary and backup failed for ${label}, trying fallback ${fallbackProvider}/${fallbackModel}`
+      );
+
+      const fallbackBreaker = getCircuitBreaker(fallbackProvider);
+      const fallbackStart = Date.now();
+      try {
+        const fallbackCallFn = backupCall ?? primaryFn;
+        const result = await enqueueAiCall(
+          fallbackProvider,
+          () => retryWithBackoff(
+            () => fallbackBreaker.fire(() => fallbackCallFn(fallbackModel!, fallbackProvider!)) as Promise<T>,
+            { maxRetries: 3, timeout },
+          ),
+          priority,
+        );
+        logMetrics(fallbackProvider, Date.now() - fallbackStart, true);
+        console.log(`[ai-fallback] Fallback ${fallbackProvider}/${fallbackModel} succeeded for ${label}`);
+        return { result, usedModel: fallbackModel!, usedProvider: fallbackProvider!, usedTier: 'fallback' };
+      } catch (fallbackError) {
+        logMetrics(fallbackProvider, Date.now() - fallbackStart, false, classifyError(fallbackError));
+        console.error(
+          `[ai-fallback] Fallback ${fallbackProvider}/${fallbackModel} also failed for ${label}`
+        );
+      }
+    }
+
+    const primaryMsg = (primaryError as { message?: string })?.message ?? String(primaryError);
+    const backupMsg = (backupError as { message?: string })?.message ?? String(backupError);
+    const fallbackTag = fallbackModel && fallbackProvider
+      ? `; fallback (${fallbackProvider}/${fallbackModel})`
+      : '';
+    throw new Error(
+      `AI call failed for ${label}: primary (${primaryProvider}/${primaryModel}): ${primaryMsg}; backup (${backupProvider}/${backupModel}): ${backupMsg}${fallbackTag}`
+    );
   }
 
-  const primaryMsg = (primaryError as { message?: string })?.message ?? String(primaryError);
-  const backupMsg = (backupError as { message?: string })?.message ?? String(backupError);
-  const fallbackTag = fallbackModel && fallbackProvider
-    ? `; fallback (${fallbackProvider}/${fallbackModel})`
-    : '';
-  throw new Error(
-    `AI call failed for ${label}: primary (${primaryProvider}/${primaryModel}): ${primaryMsg}; backup (${backupProvider}/${backupModel}): ${backupMsg}${fallbackTag}`
-  );
+  const totalTimeoutPromise = new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => {
+      const err = new Error(
+        `callWithFallback total timeout: ${label} exceeded ${totalTimeoutMs / 1000}s across all tiers`
+      );
+      (err as any).code = 'FALLBACK_TOTAL_TIMEOUT';
+      reject(err);
+    }, totalTimeoutMs);
+    if (timer.unref) timer.unref();
+  });
+
+  return Promise.race([runFallbackChain(), totalTimeoutPromise]);
 }

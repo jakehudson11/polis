@@ -31,7 +31,7 @@ from typing import Dict, List, Any, Optional
 
 # Import from local modules (set the path first)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from umap_narrative.llm_factory_constructor import get_model_provider
+from umap_narrative.llm_factory_constructor import get_model_provider, AgoraProxyProvider
 from umap_narrative.llm_factory_constructor.model_provider import AnthropicProvider
 
 # Configure logging
@@ -421,8 +421,30 @@ class BatchResultProcessor:
             return False
         
         # Get model provider and request data
+        batch_provider = self.batch_job.get('batch_provider', 'anthropic')
         model_name = self.batch_job.get('model', 'claude-3-5-sonnet-20241022')
-        model_provider = get_model_provider('anthropic', model_name)
+
+        # Check if Agora proxy is available for sequential fallback
+        agora_available = (
+            os.environ.get('LLM_PROVIDER') == 'agora'
+            or bool(os.environ.get('AGORA_BACKEND_URL'))
+        )
+
+        if agora_available:
+            model_provider = AgoraProxyProvider(
+                model=model_name,
+                provider=batch_provider,
+                backup_model=os.environ.get('NARRATIVE_BATCH_BACKUP_MODEL'),
+                backup_provider=os.environ.get('NARRATIVE_BATCH_BACKUP_PROVIDER'),
+                fallback_model=os.environ.get('NARRATIVE_BATCH_FALLBACK_MODEL'),
+                fallback_provider=os.environ.get('NARRATIVE_BATCH_FALLBACK_PROVIDER'),
+                use_case='delphi_report',
+                deliberation_id=os.environ.get('DELIBERATION_ID'),
+            )
+            logger.info(f"Using AgoraProxyProvider for sequential fallback: {batch_provider}/{model_name}")
+        else:
+            model_provider = get_model_provider(batch_provider, model_name)
+
         request_map = self.batch_job.get('request_map', {})
         total_requests = len(request_map)
         successful_requests = 0

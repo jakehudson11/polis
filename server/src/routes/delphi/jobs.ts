@@ -393,9 +393,25 @@ export async function handle_GET_delphi_jobs(
     const expressionValues: Record<string, any> = {};
     const expressionNames: Record<string, string> = {};
     if (status && status !== "all") {
-      filterParts.push("#s = :status");
-      expressionNames["#s"] = "status";
-      expressionValues[":status"] = status;
+      const statusStr = status as string;
+      if (statusStr.includes(',')) {
+        // Comma-separated: use IN operator with array of values
+        const statuses = statusStr.split(',').map(s => s.trim()).filter(s => s.length > 0);
+        // DynamoDB IN requires individual placeholders: :status0, :status1, etc.
+        const inClauses: string[] = [];
+        for (let i = 0; i < statuses.length; i++) {
+          const key = `:status${i}`;
+          inClauses.push(key);
+          expressionValues[key] = statuses[i];
+        }
+        filterParts.push(`#s IN (${inClauses.join(', ')})`);
+        expressionNames["#s"] = "status";
+      } else {
+        // Single value: use = operator (existing behavior)
+        filterParts.push("#s = :status");
+        expressionNames["#s"] = "status";
+        expressionValues[":status"] = statusStr;
+      }
     }
     if (conversation_id) {
       filterParts.push("conversation_id = :zid");
@@ -434,10 +450,73 @@ export async function handle_GET_delphi_jobs(
         return null;
       })(),
       jobConfig: item.job_config || null,
+      progressPercent: item.progress_percent ?? null,
+      progressMessage: item.progress_message ?? null,
     }));
     res.json({ status: "success", jobs, total: result.Count || jobs.length });
   } catch (err: any) {
     logger.error("Error fetching Delphi jobs:", err);
+    res.status(500).json({ status: "error", error: err.message || "Internal server error" });
+  }
+}
+
+// Handler for GET /api/v3/delphi/jobs/:jobId - Get a single Delphi job by ID
+export async function handle_GET_delphi_job(
+  req: Request,
+  res: Response
+): Promise<void> {
+  try {
+    const jobId = req.params.jobId;
+    if (!jobId) {
+      res.status(400).json({ status: "error", error: "Missing required parameter: jobId" });
+      return;
+    }
+
+    const params = {
+      TableName: "Delphi_JobQueue",
+      Key: { job_id: jobId },
+    };
+    const result = await docClient.get(params);
+    const item = result.Item;
+
+    if (!item) {
+      res.status(404).json({ status: "error", error: "Job not found" });
+      return;
+    }
+
+    const error = item.error || (() => {
+      try {
+        if (item.job_results) {
+          const parsed = typeof item.job_results === 'string' ? JSON.parse(item.job_results) : item.job_results;
+          return parsed?.error || null;
+        }
+      } catch {}
+      return null;
+    })();
+
+    const job = {
+      jobId: item.job_id,
+      status: item.status,
+      jobType: item.job_type,
+      priority: item.priority,
+      conversationId: item.conversation_id,
+      deliberationId: item.deliberation_id || null,
+      reportId: item.report_id || null,
+      retryCount: item.retry_count || 0,
+      maxRetries: item.max_retries || 3,
+      createdAt: item.created_at,
+      startedAt: item.started_at || null,
+      completedAt: item.completed_at || null,
+      workerId: item.worker_id || null,
+      error,
+      jobConfig: item.job_config || null,
+      progressPercent: item.progress_percent ?? null,
+      progressMessage: item.progress_message ?? null,
+    };
+
+    res.json({ status: "success", job });
+  } catch (err: any) {
+    logger.error("Error fetching Delphi job:", err);
     res.status(500).json({ status: "error", error: err.message || "Internal server error" });
   }
 }

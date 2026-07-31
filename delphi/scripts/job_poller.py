@@ -8,6 +8,7 @@ and execute them.
 
 import argparse
 from contextlib import contextmanager
+import re
 import sqlalchemy as sa
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, scoped_session
 from sqlalchemy.dialects.postgresql import JSON, JSONB
@@ -695,7 +696,31 @@ class JobProcessor:
         # Some submitters (e.g., delphi_cli) omit report_id, and some code paths may store it as null.
         report_id = str(parent_job.get('report_id') or conversation_id)
 
-        model = report_stage_config.get('model') or os.environ.get('ANTHROPIC_MODEL')
+        model = None
+        provider = None
+        backup_model = None
+        backup_provider = None
+        fallback_model = None
+        fallback_provider = None
+
+        # Highest priority: polis_ai_use_case_config database table
+        db_config = self._get_ai_use_case_config('delphi_report')
+        if db_config:
+            logger.info("Loaded delphi_report AI use case config from polis_ai_use_case_config for narrative batch enqueue")
+            model = db_config.get('primary_model')
+            provider = db_config.get('primary_provider')
+            backup_model = db_config.get('backup_model')
+            backup_provider = db_config.get('backup_provider')
+            fallback_model = db_config.get('fallback_model')
+            fallback_provider = db_config.get('fallback_provider')
+        else:
+            model = report_stage_config.get('model') or os.environ.get('ANTHROPIC_MODEL')
+            provider = report_stage_config.get('provider') or os.environ.get('NARRATIVE_BATCH_PROVIDER') or 'anthropic'
+            backup_model = report_stage_config.get('backup_model') or None
+            backup_provider = report_stage_config.get('backup_provider') or None
+            fallback_model = report_stage_config.get('fallback_model') or None
+            fallback_provider = report_stage_config.get('fallback_provider') or None
+
         if not model:
             self.update_job_logs(parent_job, {
                 'level': 'WARNING',
@@ -717,11 +742,6 @@ class JobProcessor:
                 max_batch_size = 20
 
         no_cache = self._coerce_bool(report_stage_config.get('no_cache'), default=False)
-        provider = report_stage_config.get('provider') or os.environ.get('NARRATIVE_BATCH_PROVIDER') or 'anthropic'
-        backup_model = report_stage_config.get('backup_model') or None
-        backup_provider = report_stage_config.get('backup_provider') or None
-        fallback_model = report_stage_config.get('fallback_model') or None
-        fallback_provider = report_stage_config.get('fallback_provider') or None
 
         now_iso = datetime.now(timezone.utc).isoformat()
         parent_job_id = parent_job.get('job_id', '')
@@ -850,6 +870,50 @@ class JobProcessor:
             logger.warning(f"Error scanning DynamoDB table {table_name} for conversation_id={cid_str}: {e}")
             return False
 
+    def _get_ai_use_case_config(self, use_case_key: str) -> Optional[Dict[str, Any]]:
+        """Query polis_ai_use_case_config for model/provider choices.
+
+        Returns a dict with keys primary_model, primary_provider, backup_model,
+        backup_provider, fallback_model, fallback_provider, or None if the lookup
+        fails or the row does not exist.
+        """
+        pg_client = None
+        try:
+            pg_client = PostgresClient()
+            pg_client.initialize()
+            sql = """
+                SELECT primary_model, primary_provider,
+                       backup_model, backup_provider,
+                       fallback_model, fallback_provider
+                FROM polis_ai_use_case_config
+                WHERE use_case_key = :key
+            """
+            rows = pg_client.query(sql, {"key": use_case_key})
+            if rows:
+                row = rows[0]
+                logger.info(
+                    f"Loaded AI use case config for '{use_case_key}' from polis_ai_use_case_config: "
+                    f"primary={row['primary_provider']}/{row['primary_model']}"
+                    + (f", backup={row['backup_provider']}/{row['backup_model']}" if row.get('backup_model') else "")
+                    + (f", fallback={row['fallback_provider']}/{row['fallback_model']}" if row.get('fallback_model') else "")
+                )
+                return {
+                    'primary_model': row['primary_model'],
+                    'primary_provider': row['primary_provider'],
+                    'backup_model': row.get('backup_model'),
+                    'backup_provider': row.get('backup_provider'),
+                    'fallback_model': row.get('fallback_model'),
+                    'fallback_provider': row.get('fallback_provider'),
+                }
+            logger.info(f"No polis_ai_use_case_config row found for '{use_case_key}'")
+            return None
+        except Exception as e:
+            logger.warning(f"Error querying polis_ai_use_case_config for '{use_case_key}': {e}. Falling back to env vars / job config.")
+            return None
+        finally:
+            if pg_client:
+                pg_client.shutdown()
+
     def _run_topic_hierarchy(
         self,
         job: Dict[str, Any],
@@ -878,6 +942,26 @@ class JobProcessor:
                 self.update_job_logs(job, {'level': 'INFO', 'message': msg})
                 return False
 
+            # Read model/provider: highest priority from polis_ai_use_case_config
+            db_config = self._get_ai_use_case_config('delphi_report')
+            if db_config:
+                logger.info("Loaded delphi_report AI use case config for topic hierarchy")
+                hierarchy_provider = 'agora'
+                hierarchy_model = db_config.get('primary_model')
+                hierarchy_backup_provider = db_config.get('backup_provider')
+                hierarchy_backup_model = db_config.get('backup_model')
+                hierarchy_fallback_provider = db_config.get('fallback_provider')
+                hierarchy_fallback_model = db_config.get('fallback_model')
+            else:
+                job_config_raw = self._safe_json_loads(job.get('job_config', '{}'), {})
+                report_cfg = self._get_stage_config(job_config_raw, 'REPORT') or {}
+                hierarchy_provider = report_cfg.get('provider') or 'anthropic'
+                hierarchy_model = report_cfg.get('model') or os.environ.get('ANTHROPIC_MODEL')
+                hierarchy_backup_provider = None
+                hierarchy_backup_model = None
+                hierarchy_fallback_provider = None
+                hierarchy_fallback_model = None
+
             cmd = [
                 sys.executable,
                 '/app/umap_narrative/751_topic_hierarchy.py',
@@ -885,12 +969,23 @@ class JobProcessor:
                 '--job_id', str(job_id),
                 '--report_id', str(report_id),
             ]
+            if hierarchy_provider:
+                cmd.append(f'--provider={hierarchy_provider}')
+            if hierarchy_model:
+                cmd.append(f'--model={hierarchy_model}')
 
             self.update_job_logs(job, {'level': 'INFO', 'message': f"Executing topic hierarchy: {' '.join(cmd)}"})
 
             env = os.environ.copy()
             env['DELPHI_JOB_ID'] = str(job_id)
             env['DELPHI_REPORT_ID'] = str(report_id)
+            if db_config:
+                env['LLM_PROVIDER'] = 'agora'
+                env['LLM_MODEL'] = str(hierarchy_model or '')
+                env['LLM_BACKUP_PROVIDER'] = str(hierarchy_backup_provider or '')
+                env['LLM_BACKUP_MODEL'] = str(hierarchy_backup_model or '')
+                env['LLM_FALLBACK_PROVIDER'] = str(hierarchy_fallback_provider or '')
+                env['LLM_FALLBACK_MODEL'] = str(hierarchy_fallback_model or '')
 
             # Ensure the Delphi app root is on PYTHONPATH for module execution.
             existing_pp = env.get('PYTHONPATH', '')
@@ -956,15 +1051,46 @@ class JobProcessor:
                 self.update_job_logs(job, {'level': 'INFO', 'message': msg})
                 return False
 
+            # Read model/provider: highest priority from polis_ai_use_case_config
+            db_config = self._get_ai_use_case_config('delphi_report')
+            if db_config:
+                logger.info("Loaded delphi_report AI use case config for topic distinction")
+                topic_provider = 'agora'
+                topic_model = db_config.get('primary_model')
+                topic_backup_provider = db_config.get('backup_provider')
+                topic_backup_model = db_config.get('backup_model')
+                topic_fallback_provider = db_config.get('fallback_provider')
+                topic_fallback_model = db_config.get('fallback_model')
+            else:
+                job_config_raw = self._safe_json_loads(job.get('job_config', '{}'), {})
+                report_cfg = self._get_stage_config(job_config_raw, 'REPORT') or {}
+                topic_provider = report_cfg.get('provider') or 'anthropic'
+                topic_model = report_cfg.get('model') or os.environ.get('ANTHROPIC_MODEL')
+                topic_backup_provider = None
+                topic_backup_model = None
+                topic_fallback_provider = None
+                topic_fallback_model = None
+
             cmd = [
                 sys.executable,
                 f'{app_path}/umap_narrative/752_enforce_topic_distinction.py',
                 '--conversation_id', str(conversation_id),
             ]
+            if topic_provider:
+                cmd.append(f'--provider={topic_provider}')
+            if topic_model:
+                cmd.append(f'--model={topic_model}')
 
             self.update_job_logs(job, {'level': 'INFO', 'message': f"Executing topic distinction: {' '.join(cmd)}"})
 
             env = os.environ.copy()
+            if db_config:
+                env['LLM_PROVIDER'] = 'agora'
+                env['LLM_MODEL'] = str(topic_model or '')
+                env['LLM_BACKUP_PROVIDER'] = str(topic_backup_provider or '')
+                env['LLM_BACKUP_MODEL'] = str(topic_backup_model or '')
+                env['LLM_FALLBACK_PROVIDER'] = str(topic_fallback_provider or '')
+                env['LLM_FALLBACK_MODEL'] = str(topic_fallback_model or '')
             existing_pp = env.get('PYTHONPATH', '')
             env['PYTHONPATH'] = f"{app_path}{os.pathsep}{existing_pp}" if existing_pp else str(app_path)
 
@@ -1130,6 +1256,20 @@ class JobProcessor:
 
         self.update_job_logs(job, {'level': 'INFO', 'message': f'Worker {self.worker_id} starting job {job_id}'})
         
+        # Initialize progress tracking
+        try:
+            self.table.update_item(
+                Key={'job_id': job_id},
+                UpdateExpression='SET progress_percent = :pct, progress_message = :msg, updated_at = :now',
+                ExpressionAttributeValues={
+                    ':pct': 0,
+                    ':msg': 'Job started — preparing pipeline',
+                    ':now': datetime.now(timezone.utc).isoformat()
+                }
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize progress for job {job_id}: {e}")
+        
         try:
             # 1. Build the command
             job_config = self._safe_json_loads(job.get('job_config', '{}'), {})
@@ -1171,11 +1311,30 @@ class JobProcessor:
             app_path = os.environ.get('DELPHI_APP_PATH', '/app')
             if job_type == 'CREATE_NARRATIVE_BATCH':
                 stage_cfg = self._get_stage_config(job_config, 'CREATE_NARRATIVE_BATCH_CONFIG_STAGE') or {}
-                stage_model = stage_cfg.get('model')
-                env_model = job_environment.get('NARRATIVE_BATCH_MODEL')
-                model = stage_model or env_model or job_config.get('model') or os.environ.get("ANTHROPIC_MODEL")
-                if not model:
-                    raise ValueError("Model not specified for CREATE_NARRATIVE_BATCH (missing job_config stage config, environment.NARRATIVE_BATCH_MODEL, and ANTHROPIC_MODEL)")
+
+                # Highest priority: polis_ai_use_case_config database table
+                db_config = self._get_ai_use_case_config('delphi_report')
+                if db_config:
+                    logger.info("Loaded delphi_report AI use case config from polis_ai_use_case_config for CREATE_NARRATIVE_BATCH")
+                    model = db_config.get('primary_model')
+                    provider = db_config.get('primary_provider')
+                    backup_model = db_config.get('backup_model')
+                    backup_provider = db_config.get('backup_provider')
+                    fallback_model = db_config.get('fallback_model')
+                    fallback_provider = db_config.get('fallback_provider')
+                    if not model:
+                        raise ValueError("primary_model missing in polis_ai_use_case_config for 'delphi_report'")
+                else:
+                    stage_model = stage_cfg.get('model')
+                    env_model = job_environment.get('NARRATIVE_BATCH_MODEL')
+                    model = stage_model or env_model or job_config.get('model') or os.environ.get("ANTHROPIC_MODEL")
+                    if not model:
+                        raise ValueError("Model not specified for CREATE_NARRATIVE_BATCH (missing job_config stage config, environment.NARRATIVE_BATCH_MODEL, and ANTHROPIC_MODEL)")
+                    provider = stage_cfg.get('provider') or os.environ.get('NARRATIVE_BATCH_PROVIDER') or 'anthropic'
+                    backup_model = stage_cfg.get('backup_model') or None
+                    backup_provider = stage_cfg.get('backup_provider') or None
+                    fallback_model = stage_cfg.get('fallback_model') or None
+                    fallback_provider = stage_cfg.get('fallback_provider') or None
 
                 max_batch_size = stage_cfg.get('max_batch_size', job_config.get('max_batch_size'))
                 if max_batch_size is None:
@@ -1192,12 +1351,6 @@ class JobProcessor:
                     stage_cfg.get('include_moderation', include_moderation),
                     default=include_moderation,
                 )
-
-                provider = stage_cfg.get('provider') or os.environ.get('NARRATIVE_BATCH_PROVIDER') or 'anthropic'
-                backup_model = stage_cfg.get('backup_model') or None
-                backup_provider = stage_cfg.get('backup_provider') or None
-                fallback_model = stage_cfg.get('fallback_model') or None
-                fallback_provider = stage_cfg.get('fallback_provider') or None
 
                 cmd = [
                     'python',
@@ -1230,44 +1383,68 @@ class JobProcessor:
                 if report_id:
                     cmd.append(f'--rid={report_id}')
                     self.update_job_logs(job, {'level': 'INFO', 'message': f"Passing report_id {report_id} to run_delphi.py"})
-                # Check for REPORT stage config with provider/model info
-                report_stage_cfg = self._get_stage_config(job_config, 'REPORT')
-                if report_stage_cfg:
-                    report_provider = report_stage_cfg.get('provider')
-                    report_model_from_cfg = report_stage_cfg.get('model')
-                    if report_provider:
-                        cmd.append(f'--provider={report_provider}')
-                    if report_model_from_cfg:
-                        cmd.append(f'--model={report_model_from_cfg}')
 
 
             # 2. Execute the command and stream logs to prevent deadlocks
             self.update_job_logs(job, {'level': 'INFO', 'message': f'Executing command: {" ".join(cmd)}'})
             
+            # Extract model/provider config: highest priority from polis_ai_use_case_config
+            db_config = self._get_ai_use_case_config('delphi_report')
+            if db_config:
+                logger.info("Loaded delphi_report AI use case config for LLM operations: "
+                            f"model={db_config.get('primary_model')}, provider=agora")
+                llm_provider = 'agora'
+                llm_model = db_config.get('primary_model')
+                llm_backup_provider = db_config.get('backup_provider') or ''
+                llm_backup_model = db_config.get('backup_model') or ''
+                llm_fallback_provider = db_config.get('fallback_provider') or ''
+                llm_fallback_model = db_config.get('fallback_model') or ''
+            else:
+                report_stage_config = self._get_stage_config(job_config, 'REPORT') or {}
+                llm_provider = report_stage_config.get('provider') or os.environ.get('NARRATIVE_BATCH_PROVIDER') or 'anthropic'
+                llm_model = report_stage_config.get('model') or os.environ.get('ANTHROPIC_MODEL')
+                llm_backup_provider = report_stage_config.get('backup_provider') or ''
+                llm_backup_model = report_stage_config.get('backup_model') or ''
+                llm_fallback_provider = report_stage_config.get('fallback_provider') or ''
+                llm_fallback_model = report_stage_config.get('fallback_model') or ''
+
             env = os.environ.copy()
             env['DELPHI_JOB_ID'] = job_id
             env['DELPHI_REPORT_ID'] = str(job.get('report_id') or conversation_id)
-            # Set provider/model env vars from REPORT stage config for FULL_PIPELINE subprocess
-            report_stage_cfg_for_env = self._get_stage_config(job_config, 'REPORT')
-            if report_stage_cfg_for_env:
-                provider_for_env = report_stage_cfg_for_env.get('provider') or 'anthropic'
-                model_for_env = report_stage_cfg_for_env.get('model') or os.environ.get('ANTHROPIC_MODEL') or 'claude-sonnet-4-20250514'
-                env['LLM_PROVIDER'] = provider_for_env
-                if provider_for_env == 'anthropic':
-                    env['ANTHROPIC_MODEL'] = model_for_env
-                elif provider_for_env == 'openai':
-                    env['OPENAI_MODEL'] = model_for_env
-                elif provider_for_env == 'deepseek':
-                    env['DEEPSEEK_MODEL'] = model_for_env
-                elif provider_for_env in ('google', 'gemini'):
-                    env['GOOGLE_MODEL'] = model_for_env
-            
+            env['LLM_PROVIDER'] = str(llm_provider)
+            env['LLM_MODEL'] = str(llm_model) if llm_model else ''
+            env['LLM_BACKUP_PROVIDER'] = str(llm_backup_provider)
+            env['LLM_BACKUP_MODEL'] = str(llm_backup_model)
+            env['LLM_FALLBACK_PROVIDER'] = str(llm_fallback_provider)
+            env['LLM_FALLBACK_MODEL'] = str(llm_fallback_model)
+
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True, env=env)
+
+            PROGRESS_RE = re.compile(r'\[PROGRESS:\s*(\d+)\]\s*(.*)')
 
             start_time = time.time()
             for line in iter(process.stdout.readline, ''):
                 # Log each line of output as it arrives
                 self.update_job_logs(job, {'level': 'INFO', 'message': f"[stdout] {line.strip()}"})
+                
+                # Parse progress markers from run_delphi.py output
+                progress_match = PROGRESS_RE.match(line.strip())
+                if progress_match:
+                    try:
+                        percent = int(progress_match.group(1))
+                        message = progress_match.group(2).strip()
+                        self.table.update_item(
+                            Key={'job_id': job_id},
+                            UpdateExpression='SET progress_percent = :pct, progress_message = :msg, updated_at = :now',
+                            ExpressionAttributeValues={
+                                ':pct': percent,
+                                ':msg': message,
+                                ':now': datetime.now(timezone.utc).isoformat()
+                            }
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to update progress for job {job_id}: {e}")
+                
                 if time.time() - start_time > timeout_seconds:
                     raise subprocess.TimeoutExpired(cmd, timeout_seconds)
             

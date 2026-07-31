@@ -14,6 +14,7 @@ import os, sys, json, boto3, logging, argparse, asyncio
 from typing import Dict, Optional
 from datetime import datetime, timedelta, timezone
 from botocore.exceptions import ClientError
+from umap_narrative.llm_factory_constructor.model_provider import log_ai_usage
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,6 +30,9 @@ ANTHROPIC_BATCH_CANCELLED = "cancelled"
 
 TERMINAL_BATCH_STATES = [ANTHROPIC_BATCH_COMPLETED, ANTHROPIC_BATCH_ENDED, ANTHROPIC_BATCH_FAILED, ANTHROPIC_BATCH_CANCELLED]
 NON_TERMINAL_BATCH_STATES = [ANTHROPIC_BATCH_PREPARING, ANTHROPIC_BATCH_IN_PROGRESS]
+
+# OpenAI-compatible Batch API Statuses
+OPENAI_TERMINAL_STATES = ["completed", "failed", "cancelled", "expired"]
 
 # Script Exit Codes (when --job-id is used)
 # The job poller treats exit code 0 as success and any non-zero as failure.
@@ -57,6 +61,20 @@ class BatchStatusChecker:
             logger.error(f"Failed to initialize Anthropic client: {e}")
             self.anthropic = None
 
+        # Initialize OpenAI client for OpenAI-compatible batch providers
+        try:
+            from openai import OpenAI
+            openai_api_key = os.environ.get("OPENAI_API_KEY")
+            if openai_api_key:
+                self.openai = OpenAI(api_key=openai_api_key)
+                logger.info("OpenAI client initialized successfully")
+            else:
+                self.openai = None
+                logger.warning("OPENAI_API_KEY not set — OpenAI-compatible batch checking unavailable")
+        except (ImportError, Exception) as e:
+            logger.warning(f"Failed to initialize OpenAI client: {e}")
+            self.openai = None
+
         # Backwards-compatible aliases for older code paths in this module.
         self.EXIT_CODE_TERMINAL_STATE = EXIT_CODE_SUCCESS
         self.EXIT_CODE_SCRIPT_ERROR = EXIT_CODE_FAILURE
@@ -67,7 +85,7 @@ class BatchStatusChecker:
         Main logic: Fetches a job, checks its batch status, and processes if complete.
         Returns an exit code to the calling process.
         """
-        if not self.anthropic:
+        if not self.anthropic and not self.openai:
             return EXIT_CODE_FAILURE
 
         try:
@@ -79,28 +97,47 @@ class BatchStatusChecker:
                 return EXIT_CODE_FAILURE
 
             batch_id = job_item.get('batch_id')
+            batch_provider = job_item.get('batch_provider', 'anthropic')
             if not batch_id:
                 logger.error(f"Job {job_id} is missing a 'batch_id'. Cannot check status.")
                 self.job_table.update_item(Key={'job_id': job_id}, UpdateExpression="SET #s = :s", ExpressionAttributeNames={'#s':'status'}, ExpressionAttributeValues={':s':'FAILED'})
                 return EXIT_CODE_FAILURE
 
-            # 2. Check the status on the Anthropic API
-            logger.info(f"Checking status for Anthropic batch {batch_id} (from job {job_id})...")
-            batch = self.anthropic.beta.messages.batches.retrieve(batch_id)
-            status = batch.processing_status
-            logger.info(f"Anthropic API returned status '{status}' for batch {batch_id}.")
+            # 2. Check the status on the batch provider API
+            if batch_provider == "anthropic":
+                if not self.anthropic:
+                    logger.error(f"Job {job_id}: Anthropic client not available.")
+                    return EXIT_CODE_FAILURE
+                logger.info(f"Checking status for Anthropic batch {batch_id} (from job {job_id})...")
+                batch = self.anthropic.beta.messages.batches.retrieve(batch_id)
+                status = batch.processing_status
+                logger.info(f"Anthropic API returned status '{status}' for batch {batch_id}.")
+                terminal_states = ["completed", "ended", "failed", "cancelled"]
+                success_states = ["completed", "ended"]
+            else:
+                # OpenAI-compatible provider
+                if not self.openai:
+                    logger.error(f"Job {job_id}: OpenAI client not available for provider '{batch_provider}'.")
+                    return EXIT_CODE_FAILURE
+                logger.info(f"Checking status for OpenAI-compatible batch {batch_id} (from job {job_id}, provider={batch_provider})...")
+                batch_obj = self.openai.batches.retrieve(batch_id)
+                status = batch_obj.status
+                logger.info(f"OpenAI API returned status '{status}' for batch {batch_id}.")
+                terminal_states = OPENAI_TERMINAL_STATES
+                success_states = ["completed"]
 
             # 3. Decide what to do based on the status
-            if status in ["completed", "ended"]:
+            if status in success_states:
                 ok = await self.process_batch_results(job_item)
                 return EXIT_CODE_SUCCESS if ok else EXIT_CODE_FAILURE
             
-            elif status in ["failed", "cancelled"]:
+            elif status in terminal_states:
+                # terminal but not success = failure
                 logger.error(f"Batch {batch_id} for job {job_id} is in a terminal failure state: {status}")
                 self.job_table.update_item(Key={'job_id': job_id}, UpdateExpression="SET #s = :s, error_message = :e", ExpressionAttributeNames={'#s':'status'}, ExpressionAttributeValues={':s':'FAILED', ':e': f'Batch status: {status}'})
                 return EXIT_CODE_FAILURE
 
-            elif status in ["in_progress", "preparing"]:
+            elif status in ["in_progress", "preparing", "validating", "finalizing"]:
                 logger.info(f"Batch {batch_id} is still {status}. Will check again later.")
                 return EXIT_CODE_PROCESSING_CONTINUES
             
@@ -120,6 +157,14 @@ class BatchStatusChecker:
 
     async def process_batch_results(self, job_item: Dict) -> bool:
         """Downloads, parses, and stores results for a completed batch job."""
+        batch_provider = job_item.get('batch_provider', 'anthropic')
+        if batch_provider == "anthropic":
+            return await self._process_anthropic_batch_results(job_item)
+        else:
+            return await self._process_openai_batch_results(job_item)
+
+    async def _process_anthropic_batch_results(self, job_item: Dict) -> bool:
+        """Downloads, parses, and stores results for a completed Anthropic batch job."""
         job_id = job_item.get('job_id', 'unknown')
         batch_id = job_item.get('batch_id')
         report_id = job_item.get('report_id')
@@ -135,6 +180,9 @@ class BatchStatusChecker:
 
             processed_count = 0
             failed_count = 0
+            total_input_tokens = 0
+            total_output_tokens = 0
+            batch_model = "unknown"
             
             for entry in results_stream:
                 result_type = getattr(entry.result, 'type', None)
@@ -166,6 +214,13 @@ class BatchStatusChecker:
                     })
                     logger.info(f"Job {job_id}: Successfully stored report for section '{section_name}'.")
                     processed_count += 1
+
+                    # Track token usage
+                    batch_model = model  # capture the model name from the first successful response
+                    usage = getattr(response_message, 'usage', None)
+                    if usage:
+                        total_input_tokens += getattr(usage, 'input_tokens', 0) or 0
+                        total_output_tokens += getattr(usage, 'output_tokens', 0) or 0
 
                 elif result_type in ("failed", "errored", "canceled", "cancelled", "expired"):
                     failed_count += 1
@@ -206,13 +261,190 @@ class BatchStatusChecker:
                 ExpressionAttributeValues=expression_values
             )
             logger.info(f"Job {job_id}: Final status set to '{final_status}'. Processed: {processed_count}, Failed: {failed_count}.")
-            
+
+            # Log actual AI usage (after successful processing)
+            if processed_count > 0:
+                try:
+                    deliberation_id = job_item.get('deliberation_id', '')
+                    log_ai_usage(
+                        use_case='delphi_report',
+                        model=batch_model,
+                        provider='anthropic',
+                        input_tokens=total_input_tokens or 1,
+                        output_tokens=total_output_tokens or 1,
+                        deliberation_id=deliberation_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"Job {job_id}: Failed to log AI usage: {e}")
+
             return processed_count > 0
         
         except Exception as e:
             logger.error(f"Job {job_id}: A critical error occurred during result processing for batch {batch_id}: {e}", exc_info=True)
             # Mark the job as FAILED
             self.job_table.update_item(Key={'job_id': job_id}, UpdateExpression="SET #s = :s, error_message = :e", ExpressionAttributeNames={'#s':'status'}, ExpressionAttributeValues={':s':'FAILED', ':e': f"Result processing error: {str(e)}"})
+            return False
+
+    async def _process_openai_batch_results(self, job_item: Dict) -> bool:
+        """Downloads, parses, and stores results for a completed OpenAI-compatible batch job."""
+        job_id = job_item.get('job_id', 'unknown')
+        batch_id = job_item.get('batch_id')
+        report_id = job_item.get('report_id')
+
+        if not all([job_id, batch_id, report_id, self.openai]):
+            logger.error(f"Job {job_id}: Missing required info (job_id, batch_id, report_id, or client) for processing.")
+            return False
+
+        try:
+            logger.info(f"Job {job_id}: Retrieving results for completed OpenAI batch {batch_id}...")
+            batch_obj = self.openai.batches.retrieve(batch_id)
+
+            if not batch_obj.output_file_id:
+                logger.error(f"Job {job_id}: OpenAI batch {batch_id} has no output_file_id.")
+                self.job_table.update_item(
+                    Key={'job_id': job_id},
+                    UpdateExpression="SET #s = :s, error_message = :e, completed_at = :time",
+                    ExpressionAttributeNames={'#s': 'status'},
+                    ExpressionAttributeValues={
+                        ':s': 'FAILED',
+                        ':e': 'Batch completed but no output_file_id.',
+                        ':time': datetime.now(timezone.utc).isoformat()
+                    }
+                )
+                return False
+
+            # Download the results file
+            results_content = self.openai.files.content(batch_obj.output_file_id).text
+            if not results_content or not results_content.strip():
+                logger.error(f"Job {job_id}: OpenAI batch {batch_id} results file is empty.")
+                self.job_table.update_item(
+                    Key={'job_id': job_id},
+                    UpdateExpression="SET #s = :s, error_message = :e, completed_at = :time",
+                    ExpressionAttributeNames={'#s': 'status'},
+                    ExpressionAttributeValues={
+                        ':s': 'FAILED',
+                        ':e': 'Batch results file is empty.',
+                        ':time': datetime.now(timezone.utc).isoformat()
+                    }
+                )
+                return False
+
+            processed_count = 0
+            failed_count = 0
+            total_input_tokens = 0
+            total_output_tokens = 0
+            batch_model = "unknown"
+
+            for line in results_content.strip().split('\n'):
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.error(f"Job {job_id}: Failed to parse JSONL line in batch results.")
+                    failed_count += 1
+                    continue
+
+                custom_id = entry.get('custom_id', '')
+                response = entry.get('response', {})
+                status_code = response.get('status_code')
+                body = response.get('body', {})
+
+                if status_code == 200:
+                    # Success
+                    model = body.get('model', 'unknown')
+                    choices = body.get('choices', [])
+                    content = ''
+                    if choices:
+                        message = choices[0].get('message', {})
+                        content = message.get('content', '')
+                        if isinstance(content, list):
+                            # Handle structured content (e.g., array of content blocks)
+                            content = json.dumps(content)
+                        elif not isinstance(content, str):
+                            content = str(content)
+
+                    # Reconstruct the section name from the custom_id
+                    parts = custom_id.split('_', 1)
+                    if len(parts) < 2:
+                        logger.error(f"Job {job_id}: Invalid custom_id format '{custom_id}'. Skipping result.")
+                        failed_count += 1
+                        continue
+                    section_name = parts[1]
+
+                    # Store the report
+                    rid_section_model = f"{report_id}#{section_name}#{model}"
+                    self.report_table.put_item(Item={
+                        'rid_section_model': rid_section_model,
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
+                        'report_id': report_id,
+                        'section': section_name,
+                        'model': model,
+                        'report_data': content,
+                        'job_id': job_id,
+                        'batch_id': batch_id,
+                    })
+                    logger.info(f"Job {job_id}: Successfully stored report for section '{section_name}'.")
+                    processed_count += 1
+
+                    # Track token usage
+                    batch_model = body.get('model', batch_model)
+                    usage = body.get('usage', {})
+                    total_input_tokens += usage.get('prompt_tokens', 0)
+                    total_output_tokens += usage.get('completion_tokens', 0)
+                else:
+                    failed_count += 1
+                    error_data = body.get('error', {})
+                    logger.error(
+                        f"Job {job_id}: Request failed in OpenAI batch {batch_id}. "
+                        f"Custom ID: {custom_id}. Status: {status_code}. Error: {error_data}"
+                    )
+
+            # Finalize the job status
+            final_status = 'COMPLETED' if processed_count > 0 else 'FAILED'
+            update_expression = "SET #s = :status, completed_at = :time"
+            expression_values = {':status': final_status, ':time': datetime.now(timezone.utc).isoformat()}
+
+            if failed_count > 0:
+                update_expression += ", error_message = :error"
+                expression_values[':error'] = f"{failed_count} of {failed_count + processed_count} batch requests failed."
+            elif processed_count == 0:
+                update_expression += ", error_message = :error"
+                expression_values[':error'] = "No results were returned by the batch results stream."
+
+            self.job_table.update_item(
+                Key={'job_id': job_id},
+                UpdateExpression=update_expression,
+                ExpressionAttributeNames={'#s': 'status'},
+                ExpressionAttributeValues=expression_values
+            )
+            logger.info(f"Job {job_id}: Final status set to '{final_status}'. Processed: {processed_count}, Failed: {failed_count}.")
+
+            if processed_count > 0:
+                try:
+                    batch_provider_name = job_item.get('batch_provider', 'openai')
+                    deliberation_id = job_item.get('deliberation_id', '')
+                    log_ai_usage(
+                        use_case='delphi_report',
+                        model=batch_model,
+                        provider=batch_provider_name,
+                        input_tokens=total_input_tokens or 1,
+                        output_tokens=total_output_tokens or 1,
+                        deliberation_id=deliberation_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"Job {job_id}: Failed to log AI usage: {e}")
+
+            return processed_count > 0
+
+        except Exception as e:
+            logger.error(f"Job {job_id}: A critical error occurred during OpenAI result processing for batch {batch_id}: {e}", exc_info=True)
+            self.job_table.update_item(
+                Key={'job_id': job_id},
+                UpdateExpression="SET #s = :s, error_message = :e",
+                ExpressionAttributeNames={'#s': 'status'},
+                ExpressionAttributeValues={':s': 'FAILED', ':e': f"Result processing error: {str(e)}"}
+            )
             return False
 
     async def check_and_process_jobs(self, specific_job_id: Optional[str] = None) -> Optional[int]:

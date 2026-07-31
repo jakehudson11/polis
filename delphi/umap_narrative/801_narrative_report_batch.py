@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 import re  # Added re import for regex operations
 import requests  # Added for HTTP error handling
+import tempfile  # Added for batch file uploads
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union, Tuple
@@ -45,7 +46,7 @@ import traceback  # Added for detailed error tracing
 
 # Import the model provider
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from umap_narrative.llm_factory_constructor import get_model_provider
+from umap_narrative.llm_factory_constructor import get_model_provider, AgoraProxyProvider
 from umap_narrative.llm_factory_constructor.model_provider import AnthropicProvider
 
 # Import from local modules
@@ -206,7 +207,7 @@ class BatchReportGenerator:
                  backup_model=None, backup_provider=None,
                  fallback_model=None, fallback_provider=None,
                  no_cache=False, max_batch_size=20, job_id=None, layers=None,
-                 include_moderation=False):
+                 include_moderation=False, deliberation_id=None):
         """Initialize the batch report generator."""
         self.conversation_id = str(conversation_id)
         if not model:
@@ -224,6 +225,7 @@ class BatchReportGenerator:
         self.layers = layers  # List of layers to process, or None for all layers
         self.job_id = job_id or os.environ.get('DELPHI_JOB_ID')
         self.report_id = os.environ.get('DELPHI_REPORT_ID')
+        self.deliberation_id = deliberation_id or os.environ.get('DELIBERATION_ID')
         self.postgres_client = PostgresClient()
         self.include_moderation = include_moderation
 
@@ -1769,8 +1771,17 @@ class BatchReportGenerator:
 
             logger.info(f"Processing request for topic: {topic_name}")
 
-            # Create Anthropic provider
-            anthropic_provider = get_model_provider("anthropic", self.model)
+            # Create provider via cascade
+            from umap_narrative.llm_factory_constructor import get_model_provider_with_cascade
+            config = {
+                'provider': self.provider,
+                'model': self.model,
+                'backup_provider': self.backup_provider,
+                'backup_model': self.backup_model,
+                'fallback_provider': self.fallback_provider,
+                'fallback_model': self.fallback_model,
+            }
+            anthropic_provider = get_model_provider_with_cascade(config)
 
             # Get response from LLM
             response = await anthropic_provider.get_completion(
@@ -1818,13 +1829,35 @@ class BatchReportGenerator:
         Process batch requests sequentially for providers without a Batch API.
         Stores results directly in DynamoDB via NarrativeReportService.
         Returns True on success, False on failure.
+        
+        If Agora proxy is available (AGORA_BACKEND_URL or LLM_PROVIDER=agora),
+        uses AgoraProxyProvider with full cascade config for resilience.
         """
-        from umap_narrative.llm_factory_constructor.model_provider import get_model_provider
 
         logger.info(f"Starting sequential processing with {provider_type}/{model_name} for {len(batch_requests)} requests")
 
+        # Check if Agora proxy is available
+        agora_available = (
+            os.environ.get('LLM_PROVIDER') == 'agora'
+            or bool(os.environ.get('AGORA_BACKEND_URL'))
+        )
+
         try:
-            provider = get_model_provider(provider_type=provider_type, model_name=model_name)
+            if agora_available:
+                provider = AgoraProxyProvider(
+                    model=model_name,
+                    provider=provider_type,
+                    backup_model=os.environ.get('NARRATIVE_BATCH_BACKUP_MODEL'),
+                    backup_provider=os.environ.get('NARRATIVE_BATCH_BACKUP_PROVIDER'),
+                    fallback_model=os.environ.get('NARRATIVE_BATCH_FALLBACK_MODEL'),
+                    fallback_provider=os.environ.get('NARRATIVE_BATCH_FALLBACK_PROVIDER'),
+                    use_case='delphi_report',
+                    deliberation_id=os.environ.get('DELIBERATION_ID'),
+                )
+                logger.info(f"Using AgoraProxyProvider for sequential fallback: {provider_type}/{model_name}")
+            else:
+                from umap_narrative.llm_factory_constructor.model_provider import get_model_provider
+                provider = get_model_provider(provider_type=provider_type, model_name=model_name)
         except Exception as e:
             logger.error(f"Failed to initialize {provider_type} provider: {e}")
             return False
@@ -1883,6 +1916,213 @@ class BatchReportGenerator:
         logger.info(f"Sequential processing complete: {success_count} succeeded, {fail_count} failed")
         return fail_count == 0  # True only if ALL succeeded
 
+    async def _submit_openai_compatible_batch(self, provider, model_name, batch_requests):
+        """Submit batch requests to an OpenAI-compatible Batch API.
+        
+        Works with OpenAI, DeepSeek, Qwen (DashScope), z.ai, moonshot, 
+        and any other provider that implements the OpenAI /v1/chat/completions Batch API.
+        """
+        logger.info(f"Processing OpenAI-compatible batch of {len(batch_requests)} requests for conversation {self.conversation_id}")
+        if self.job_id:
+            logger.info(f"Job ID: {self.job_id}")
+        if self.report_id:
+            logger.info(f"Report ID: {self.report_id}")
+        
+        # Resolve API key for this provider
+        provider_upper = provider.upper()
+        api_key_env_var = f"{provider_upper}_API_KEY"
+        api_key = os.environ.get(api_key_env_var)
+        if not api_key:
+            # Try generic fallback keys
+            api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
+        if not api_key:
+            logger.error(f"ERROR: No API key found for provider '{provider}'. Tried {api_key_env_var} and fallbacks.")
+            return None
+        
+        # Resolve base URL for this provider
+        # Providers table base_url format: https://api.openai.com/v1
+        # Batch endpoint: base_url + /batches (for OpenAI-style) or /v1/batches
+        # Standard OpenAI format: POST https://api.openai.com/v1/chat/completions
+        try:
+            import psycopg2
+            polis_db_url = os.environ.get("DATABASE_URL")  # e.g. postgres://polis:pass@postgres:5432/polis
+            if polis_db_url:
+                parsed = polis_db_url.replace("postgres://", "http://")
+                from urllib.parse import urlparse
+                u = urlparse(parsed)
+                conn = psycopg2.connect(
+                    host=u.hostname, port=u.port or 5432,
+                    dbname="polis", user="polis", password=u.password or ""
+                )
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT base_url FROM polis_ai_providers WHERE LOWER(name) = LOWER(%s) AND is_active = true ORDER BY id LIMIT 1",
+                    (provider,)
+                )
+                row = cur.fetchone()
+                base_url = row[0] if row else None
+                cur.close(); conn.close()
+            else:
+                base_url = None
+        except Exception as e:
+            logger.warning(f"Could not resolve base_url from polis_ai_providers: {e}")
+            base_url = None
+        
+        if not base_url:
+            # Fallback: construct standard URL pattern
+            base_url = f"https://api.{provider}.com/v1"
+        
+        logger.info(f"Using base_url: {base_url} for provider: {provider}")
+        
+        # Initialize OpenAI client
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url)
+        except ImportError as e:
+            logger.error(f"Failed to import OpenAI SDK: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI client for {provider}: {e}")
+            return None
+        
+        # Format requests as JSONL (one JSON object per line)
+        logger.info("Formatting batch requests for OpenAI-compatible API...")
+        jsonl_lines = []
+        
+        for i, request in enumerate(batch_requests):
+            metadata = request.get('metadata', {})
+            section_name = metadata.get('section_name', f'section_{i}')
+            
+            # Build a safe custom_id
+            if self.job_id and self.job_id in section_name:
+                short_job_id = self.job_id[:8]
+                shortened = section_name.replace(self.job_id, short_job_id)
+                custom_id = f"{self.conversation_id}_{shortened}"
+            else:
+                custom_id = f"{self.conversation_id}_{section_name}"
+            safe_custom_id = re.sub(r'[^a-zA-Z0-9_-]', '_', custom_id)
+            if len(safe_custom_id) > 64:
+                safe_custom_id = safe_custom_id[:64]
+            
+            # Extract content
+            system_content = request.get('system', '')
+            if not system_content:
+                system_content = "You are a helpful AI assistant analyzing survey data."
+            
+            user_content = ''
+            if 'messages' in request and len(request.get('messages', [])) > 0:
+                user_content = request.get('messages', [])[0].get('content', '')
+            if not user_content:
+                logger.warning(f"Empty user prompt for request {i}, skipping")
+                continue
+            
+            # Build OpenAI chat completion body
+            messages = []
+            if system_content:
+                messages.append({"role": "system", "content": system_content})
+            messages.append({"role": "user", "content": user_content})
+            
+            body = {
+                "model": model_name,
+                "messages": messages,
+                "max_tokens": request.get('max_tokens', 4000),
+            }
+            
+            jsonl_lines.append(json.dumps({
+                "custom_id": safe_custom_id,
+                "method": "POST",
+                "url": "/v1/chat/completions",
+                "body": body,
+            }))
+        
+        if not jsonl_lines:
+            logger.error("No valid batch requests to submit")
+            return None
+        
+        jsonl_content = "\n".join(jsonl_lines)
+        logger.info(f"Prepared {len(jsonl_lines)} JSONL requests")
+        
+        # Upload JSONL file
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+                f.write(jsonl_content)
+                tmp_path = f.name
+            
+            with open(tmp_path, 'rb') as f:
+                file_obj = client.files.create(file=f, purpose="batch")
+            os.unlink(tmp_path)
+            
+            logger.info(f"Uploaded batch input file: {file_obj.id}")
+        except Exception as e:
+            logger.error(f"Failed to upload batch input file: {e}")
+            return None
+        
+        # Create batch
+        try:
+            batch = client.batches.create(
+                input_file_id=file_obj.id,
+                endpoint="/v1/chat/completions",
+                completion_window="24h",
+            )
+            logger.info(f"Successfully created OpenAI-compatible batch: {batch.id}")
+        except Exception as e:
+            logger.error(f"Failed to create batch: {e}")
+            return None
+        
+        # Store batch info in DynamoDB
+        if self.job_id:
+            try:
+                job_table = self.dynamodb.Table('Delphi_JobQueue')
+                batch_id_str = str(batch.id)
+                
+                job_table.update_item(
+                    Key={'job_id': self.job_id},
+                    UpdateExpression="SET batch_id = :bid, #s = :status, model = :model, batch_provider = :bprov",
+                    ExpressionAttributeNames={'#s': 'status'},
+                    ExpressionAttributeValues={
+                        ':bid': batch_id_str,
+                        ':status': 'PROCESSING',
+                        ':model': model_name,
+                        ':bprov': provider,
+                    }
+                )
+                logger.info(f"Stored batch_id={batch_id_str}, batch_provider={provider} in job {self.job_id}")
+                
+                # Look up deliberation_id from the parent job for cross-system tracking
+                deliberation_id = ''
+                try:
+                    parent_resp = job_table.get_item(Key={'job_id': self.job_id})
+                    if 'Item' in parent_resp:
+                        deliberation_id = parent_resp['Item'].get('deliberation_id') or ''
+                except Exception:
+                    pass
+                
+                # Schedule status check job
+                now = datetime.now().isoformat()
+                status_check_job_id = f"batch_check_{self.job_id}_{int(time.time())}"
+                status_job = {
+                    'job_id': status_check_job_id,
+                    'status': 'PENDING',
+                    'job_type': 'AWAITING_NARRATIVE_BATCH',
+                    'batch_job_id': self.job_id,
+                    'batch_id': batch_id_str,
+                    'batch_provider': provider,
+                    'conversation_id': self.conversation_id,
+                    'report_id': self.report_id,
+                    'deliberation_id': deliberation_id,
+                    'created_at': now,
+                    'updated_at': now,
+                    'priority': 50,
+                    'version': 1,
+                    'logs': json.dumps({'entries': []})
+                }
+                job_table.put_item(Item=status_job)
+                logger.info(f"Scheduled batch status check job {status_check_job_id} with provider={provider}")
+            except Exception as e:
+                logger.error(f"Failed to update DynamoDB: {e}")
+        
+        return batch.id
+
     async def submit_batch(self):
         """Prepare and process a batch of topic report requests with provider cascading."""
         logger.info(f"=== Starting batch submission with provider={self.provider} ===")
@@ -1917,6 +2157,8 @@ class BatchReportGenerator:
             try:
                 if prov == "anthropic":
                     result = await self._submit_anthropic_batch(mod, batch_requests)
+                elif prov in ("openai", "deepseek", "qwen", "moonshot", "bytedance", "kimi", "z.ai"):
+                    result = await self._submit_openai_compatible_batch(prov, mod, batch_requests)
                 else:
                     result = await self._submit_sequential(prov, mod, batch_requests)
 
@@ -2155,14 +2397,15 @@ class BatchReportGenerator:
                     # Update the job with batch information - fixed version with ExpressionAttributeNames
                     update_response = job_table.update_item(
                         Key={'job_id': self.job_id},
-                        UpdateExpression="SET batch_id = :batch_id, #s = :job_status, model = :model",
+                        UpdateExpression="SET batch_id = :batch_id, #s = :job_status, model = :model, batch_provider = :batch_provider",
                         ExpressionAttributeNames={
                             '#s': 'status'  # Use ExpressionAttributeNames to avoid 'status' reserved keyword
                         },
                         ExpressionAttributeValues={
                             ':batch_id': batch_id_str,
                             ':job_status': 'PROCESSING',  # Set job status to PROCESSING so poller knows to check batch status
-                            ':model': model_name  # Store the model name
+                            ':model': model_name,  # Store the model name
+                            ':batch_provider': 'anthropic',
                         },
                         ReturnValues="UPDATED_NEW"
                     )
@@ -2192,6 +2435,15 @@ class BatchReportGenerator:
                         # Current timestamp
                         now = datetime.now().isoformat()
 
+                        # Look up deliberation_id from the parent job for cross-system tracking
+                        deliberation_id = ''
+                        try:
+                            parent_resp = job_table.get_item(Key={'job_id': self.job_id})
+                            if 'Item' in parent_resp:
+                                deliberation_id = parent_resp['Item'].get('deliberation_id') or ''
+                        except Exception:
+                            pass
+
                         # Create the status check job with the new job type
                         status_job = {
                             'job_id': status_check_job_id,
@@ -2199,8 +2451,10 @@ class BatchReportGenerator:
                             'job_type': 'AWAITING_NARRATIVE_BATCH',  # New job type for clearer state machine
                             'batch_job_id': self.job_id,
                             'batch_id': batch.id,
+                            'batch_provider': 'anthropic',
                             'conversation_id': self.conversation_id,
                             'report_id': self.report_id,
+                            'deliberation_id': deliberation_id,
                             'created_at': now,
                             'updated_at': now,
                             'priority': 50,  # Medium priority

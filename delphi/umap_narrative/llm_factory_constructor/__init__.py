@@ -1,3 +1,3 @@
-from .model_provider import get_model_provider, ModelProvider, OllamaProvider, AnthropicProvider, OpenAIProvider, DeepSeekProvider, GoogleProvider
+from .model_provider import get_model_provider, get_model_provider_with_cascade, ModelProvider, OllamaProvider, AnthropicProvider, OpenAIProvider, DeepSeekProvider, GoogleProvider, AgoraProxyProvider
 
-__all__ = ['get_model_provider', 'ModelProvider', 'OllamaProvider', 'AnthropicProvider', 'OpenAIProvider', 'DeepSeekProvider', 'GoogleProvider']
+__all__ = ['get_model_provider', 'get_model_provider_with_cascade', 'ModelProvider', 'OllamaProvider', 'AnthropicProvider', 'OpenAIProvider', 'DeepSeekProvider', 'GoogleProvider', 'AgoraProxyProvider']

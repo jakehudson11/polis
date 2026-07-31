@@ -39,13 +39,36 @@ function getOrCreateQueue(provider: string): any {
   return queue;
 }
 
+/**
+ * Default maximum time (in ms) a call may wait in the queue for a concurrency
+ * slot before rejecting.  Set generously because LLM calls can be long-running,
+ * but a caller should never block indefinitely.
+ */
+const DEFAULT_QUEUE_TIMEOUT_MS = 120_000;
+
 export async function enqueueAiCall<T>(
   provider: string,
   fn: () => Promise<T>,
-  priority: number = AI_PRIORITY.BACKGROUND
+  priority: number = AI_PRIORITY.BACKGROUND,
+  queueTimeoutMs: number = DEFAULT_QUEUE_TIMEOUT_MS
 ): Promise<T> {
   const queue = getOrCreateQueue(provider);
-  return queue.add(fn, { priority }) as Promise<T>;
+
+  const queueTask = queue.add(fn, { priority }) as Promise<T>;
+
+  const timeoutTask = new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => {
+      const err = new Error(
+        `AI queue timeout: waited ${queueTimeoutMs / 1000}s for a ${provider} provider slot`
+      );
+      (err as any).code = 'QUEUE_TIMEOUT';
+      reject(err);
+    }, queueTimeoutMs);
+    // Allow Node to exit even if this timer is still pending
+    if (timer.unref) timer.unref();
+  });
+
+  return Promise.race([queueTask, timeoutTask]);
 }
 
 export function getQueueStats(): Record<string, { size: number; pending: number }> {

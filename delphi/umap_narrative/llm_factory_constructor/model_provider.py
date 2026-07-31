@@ -633,6 +633,239 @@ class GoogleProvider(ModelProvider):
     def list_available_models(self) -> List[str]:
         return ["gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
 
+
+class AgoraProxyProvider(ModelProvider):
+    """Provider that routes LLM calls through Agora's resilience layer.
+    
+    Instead of calling LLM APIs directly, this provider sends requests
+    to the Agora backend which handles fallback, circuit breakers,
+    and unified logging.
+    
+    Supports full 3-tier cascade: primary → backup → fallback.
+    """
+    
+    def __init__(self, model, provider, 
+                 backup_model=None, backup_provider=None,
+                 fallback_model=None, fallback_provider=None,
+                 temperature=None, max_tokens=None, json_mode=False,
+                 use_case='delphi_report',
+                 deliberation_id=None,
+                 admin_user_id=None):
+        """Initialize the Agora proxy provider with full cascade config.
+        
+        Args:
+            model: Primary model name
+            provider: Primary provider name (e.g., 'anthropic', 'openai')
+            backup_model: Backup model name for fallback tier 1
+            backup_provider: Backup provider name for fallback tier 1
+            fallback_model: Fallback model name for fallback tier 2
+            fallback_provider: Fallback provider name for fallback tier 2
+            temperature: LLM temperature
+            max_tokens: Maximum output tokens
+            json_mode: Whether to request JSON mode
+            use_case: Identifier for Agora's usage logging
+            deliberation_id: The Agora deliberation ID
+            admin_user_id: The admin user ID for authorization
+        """
+        self.model = model
+        self.provider = provider
+        self.backup_model = backup_model
+        self.backup_provider = backup_provider
+        self.fallback_model = fallback_model
+        self.fallback_provider = fallback_provider
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.json_mode = json_mode
+        self.use_case = use_case
+        self.deliberation_id = deliberation_id
+        self.admin_user_id = admin_user_id
+    
+    def get_response(self, system_message: str, user_message: str) -> str:
+        """Send messages to Agora proxy and return the content string.
+        
+        Converts the simple system_message/user_message format
+        into OpenAI-style messages array, sends to Agora,
+        and returns just the content string (maintaining compatibility
+        with the existing interface).
+        """
+        # Build messages array from system/user format
+        messages = []
+        if system_message:
+            messages.append({"role": "system", "content": system_message})
+        messages.append({"role": "user", "content": user_message})
+        
+        # Resolve Agora backend URL
+        agora_backend_url = os.environ.get('AGORA_BACKEND_URL') or os.environ.get('AGORA_API_URL') or 'http://agora-backend:3000'
+        url = f"{agora_backend_url.rstrip('/')}/api/v1/internal/llm"
+        
+        # Auth header
+        internal_key = os.environ.get('POLIS_INTERNAL_PROXY_SECRET') or os.environ.get('POLIS_INTERNAL_KEY') or ''
+        headers = {
+            'Content-Type': 'application/json',
+            'x-polis-internal-key': internal_key,
+        }
+        
+        # Build payload with all tier config
+        payload = {
+            "messages": messages,
+            "model": self.model,
+            "provider": self.provider,
+            "backup_model": self.backup_model,
+            "backup_provider": self.backup_provider,
+            "fallback_model": self.fallback_model,
+            "fallback_provider": self.fallback_provider,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "json_mode": self.json_mode,
+            "use_case": self.use_case,
+            "deliberation_id": self.deliberation_id,
+            "admin_user_id": self.admin_user_id,
+        }
+        # Remove None values so Agora uses its own defaults for unset fields
+        payload = {k: v for k, v in payload.items() if v is not None}
+        
+        logger.info(
+            "AgoraProxy: sending request to %s (provider=%s, model=%s, backup=%s/%s, fallback=%s/%s)",
+            url, self.provider, self.model,
+            self.backup_provider, self.backup_model,
+            self.fallback_provider, self.fallback_model,
+        )
+        
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=120)
+            
+            if response.status_code == 200:
+                data = response.json()
+                content = data.get('content', '')
+                actual_model = data.get('model', 'unknown')
+                actual_provider = data.get('provider', 'unknown')
+                logger.info(
+                    "AgoraProxy: received response from %s/%s (%d chars)",
+                    actual_provider, actual_model, len(content),
+                )
+                return content
+            else:
+                error_text = response.text[:500] if response.text else 'No response body'
+                logger.error(
+                    "AgoraProxy: request failed with status %d: %s",
+                    response.status_code, error_text,
+                )
+                raise RuntimeError(
+                    f"Agora proxy returned status {response.status_code}: {error_text}"
+                )
+        except requests.exceptions.Timeout:
+            logger.error("AgoraProxy: request timed out after 120s")
+            raise RuntimeError("Agora proxy request timed out after 120 seconds")
+        except requests.exceptions.ConnectionError as e:
+            logger.error("AgoraProxy: connection error: %s", str(e))
+            raise RuntimeError(f"Agora proxy connection failed: {e}")
+        except requests.exceptions.RequestException as e:
+            logger.error("AgoraProxy: request error: %s", str(e))
+            raise RuntimeError(f"Agora proxy request failed: {e}")
+    
+    def list_available_models(self) -> List[str]:
+        """List available models (delegated to Agora)."""
+        # The proxy abstracts model selection; return the configured tiers
+        models = [f"{self.provider}/{self.model}"]
+        if self.backup_provider and self.backup_model:
+            models.append(f"{self.backup_provider}/{self.backup_model}")
+        if self.fallback_provider and self.fallback_model:
+            models.append(f"{self.fallback_provider}/{self.fallback_model}")
+        return models
+
+
+def log_ai_usage(
+    use_case: str,
+    model: str,
+    provider: str,
+    input_tokens: int,
+    output_tokens: int,
+    deliberation_id: str = None,
+    origin: str = 'polis',
+):
+    """Log AI usage to Agora's internal usage endpoint.
+    
+    Args:
+        use_case: The use case identifier (e.g., 'delphi_report')
+        model: The model name used
+        provider: The provider name
+        input_tokens: Number of input/prompt tokens
+        output_tokens: Number of output/completion tokens
+        deliberation_id: The Agora deliberation ID
+        origin: Origin system ('polis' or 'agora')
+    """
+    import requests as req
+    
+    agora_backend_url = os.environ.get('AGORA_BACKEND_URL') or os.environ.get('AGORA_API_URL') or 'http://agora-backend:3000'
+    internal_key = os.environ.get('POLIS_INTERNAL_PROXY_SECRET') or os.environ.get('POLIS_INTERNAL_KEY') or ''
+    
+    url = f"{agora_backend_url.rstrip('/')}/api/v1/internal/ai-usage"
+    headers = {
+        'Content-Type': 'application/json',
+        'x-polis-internal-key': internal_key,
+    }
+    payload = {
+        'use_case': use_case,
+        'model': model,
+        'provider': provider,
+        'input_tokens': input_tokens,
+        'output_tokens': output_tokens,
+        'deliberation_id': deliberation_id or '',
+        'origin': origin,
+    }
+    
+    try:
+        resp = req.post(url, json=payload, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            logger.info(f"Logged AI usage: {provider}/{model}, {input_tokens}+{output_tokens} tokens")
+        else:
+            logger.warning(f"Failed to log AI usage (status {resp.status_code}): {resp.text[:200]}")
+    except Exception as e:
+        logger.warning(f"Failed to log AI usage (connection error): {e}")
+
+def get_model_provider_with_cascade(report_stage_config: dict) -> ModelProvider:
+    """Resolve a model provider that delegates cascade to Agora's resilience layer.
+    
+    Instead of trying each tier locally, this creates a single AgoraProxyProvider
+    with all tiers configured so that Agora's callAIProvider handles the cascade
+    with circuit breakers, fallback, and unified logging.
+    
+    Args:
+        report_stage_config: Dict with keys 'provider', 'model', 
+            'backup_provider', 'backup_model', 'fallback_provider', 'fallback_model'
+    
+    Returns:
+        An AgoraProxyProvider instance with all tiers configured
+    
+    Raises:
+        ValueError: If no primary provider/model is configured
+    """
+    primary_provider = report_stage_config.get('provider') or os.environ.get('NARRATIVE_BATCH_PROVIDER')
+    primary_model = report_stage_config.get('model') or os.environ.get('ANTHROPIC_MODEL')
+    
+    if not primary_provider or not primary_model:
+        raise ValueError(
+            "Primary provider and model must be configured. "
+            "Set 'provider'/'model' in config or NARRATIVE_BATCH_PROVIDER/ANTHROPIC_MODEL env vars."
+        )
+    
+    logger.info(
+        "Cascade: delegating to AgoraProxy (primary=%s/%s, backup=%s/%s, fallback=%s/%s)",
+        primary_provider, primary_model,
+        report_stage_config.get('backup_provider'), report_stage_config.get('backup_model'),
+        report_stage_config.get('fallback_provider'), report_stage_config.get('fallback_model'),
+    )
+    
+    return AgoraProxyProvider(
+        model=primary_model,
+        provider=primary_provider,
+        backup_model=report_stage_config.get('backup_model'),
+        backup_provider=report_stage_config.get('backup_provider'),
+        fallback_model=report_stage_config.get('fallback_model'),
+        fallback_provider=report_stage_config.get('fallback_provider'),
+    )
+
+
 def get_model_provider(provider_type: str = None, model_name: str = None) -> ModelProvider:
     """
     Factory function to get the appropriate model provider.
@@ -675,6 +908,14 @@ def get_model_provider(provider_type: str = None, model_name: str = None) -> Mod
         api_key = os.environ.get("GOOGLE_GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
         logger.info(f"Using Google provider with model: {model_name}")
         return GoogleProvider(model_name=model_name, api_key=api_key)
+    elif provider_type and provider_type.lower() == "agora":
+        model_name = model_name or os.environ.get("ANTHROPIC_MODEL")
+        if not model_name:
+            raise ValueError("Model name must be specified or ANTHROPIC_MODEL env var must be set")
+        # Agora provider type uses the proxy — delegate all LLM calls through Agora
+        provider = provider_type.lower()
+        logger.info(f"Using AgoraProxy provider with model: {model_name} (provider={provider})")
+        return AgoraProxyProvider(model=model_name, provider=provider)
     else:
         # Default to Ollama
         model_name = model_name or os.environ.get("OLLAMA_MODEL", "llama3")

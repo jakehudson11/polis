@@ -11,6 +11,24 @@ export interface AIRouterOptions {
   temperature?: number;
 }
 
+/** HTTP-level timeout for provider API calls (ms).  120 s is generous
+ *  enough for the largest LLM responses while avoiding indefinite hangs. */
+const PROVIDER_HTTP_TIMEOUT_MS = 120_000;
+
+/** Helper: returns a promise that rejects after `ms` with a descriptive error. */
+function createTimeoutRejection(provider: string, ms: number): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => {
+      const err = new Error(
+        `AI provider HTTP timeout: ${provider} call exceeded ${ms / 1000}s`
+      );
+      (err as any).code = 'PROVIDER_HTTP_TIMEOUT';
+      reject(err);
+    }, ms);
+    if (timer.unref) timer.unref();
+  });
+}
+
 /**
  * Clamps temperature for providers that only accept specific values.
  * Moonshot (Kimi) models require temperature = 1.0 exactly.
@@ -40,7 +58,10 @@ export async function callAIProvider(
     const userMsgs = messages.filter(m => m.role !== 'system');
     const prompt = [systemMsg, ...userMsgs.map(m => m.content)].filter(Boolean).join('\n\n');
     const geminiModel = (client as any).getGenerativeModel({ model });
-    const result = await geminiModel.generateContent(prompt);
+    const result = await Promise.race([
+      geminiModel.generateContent(prompt),
+      createTimeoutRejection(provider, PROVIDER_HTTP_TIMEOUT_MS),
+    ]);
     return {
       content: result.response.text(),
       inputTokens: result.response.usageMetadata?.promptTokenCount ?? 0,
@@ -51,13 +72,16 @@ export async function callAIProvider(
   if (provider === 'anthropic') {
     const systemMsg = messages.find(m => m.role === 'system')?.content;
     const anthropic = client as any;
-    const response = await anthropic.messages.create({
-      model,
-      max_tokens: maxTokens,
-      temperature,
-      ...(systemMsg ? { system: systemMsg } : {}),
-      messages: messages.filter(m => m.role !== 'system').map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-    });
+    const response = await Promise.race([
+      anthropic.messages.create({
+        model,
+        max_tokens: maxTokens,
+        temperature,
+        ...(systemMsg ? { system: systemMsg } : {}),
+        messages: messages.filter(m => m.role !== 'system').map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+      }),
+      createTimeoutRejection(provider, PROVIDER_HTTP_TIMEOUT_MS),
+    ]);
     return {
       content: response.content[0]?.type === 'text' ? response.content[0].text : '',
       inputTokens: response.usage?.input_tokens ?? 0,
@@ -67,12 +91,15 @@ export async function callAIProvider(
 
   // OpenAI-compatible (openai, deepseek, qwen, and unknown providers)
   const openaiClient = client as any;
-  const completion = await openaiClient.chat.completions.create({
-    model,
-    messages: messages as any,
-    max_completion_tokens: maxTokens,
-    temperature,
-  });
+  const completion = await Promise.race([
+    openaiClient.chat.completions.create({
+      model,
+      messages: messages as any,
+      max_completion_tokens: maxTokens,
+      temperature,
+    }),
+    createTimeoutRejection(provider, PROVIDER_HTTP_TIMEOUT_MS),
+  ]);
   return {
     content: completion.choices[0]?.message?.content ?? '',
     inputTokens: completion.usage?.prompt_tokens ?? 0,

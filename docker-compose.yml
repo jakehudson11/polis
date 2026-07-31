@@ -144,6 +144,10 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL=${OPENAI_MODEL}
       
+      # Agora Backend Integration
+      - AGORA_BACKEND_URL=http://agora-backend:3000
+      - POLIS_INTERNAL_PROXY_SECRET=${POLIS_INTERNAL_PROXY_SECRET}
+      
       # DynamoDB (Optional - for job queue)
       - DYNAMODB_ENDPOINT=${DYNAMODB_ENDPOINT}
       
@@ -163,6 +167,7 @@ services:
       - INSTANCE_SIZE=${INSTANCE_SIZE:-default}
     networks:
       - polis-net
+      - agora-net
     depends_on:
       - polis-postgres
       - dynamodb-local
