@@ -176,7 +176,7 @@ def submit_job(dynamodb, zid, job_type='FULL_PIPELINE', priority=50,
         'job_type': job_type,
         'priority': priority,
         'conversation_id': str(zid),          # Using conversation_id (but still accept zid as input)
-        'retry_count': 0,
+        'retry_count': 1,
         'max_retries': 3,
         'timeout_seconds': 7200,              # 2 hours default timeout
         'job_config': json.dumps(job_config),

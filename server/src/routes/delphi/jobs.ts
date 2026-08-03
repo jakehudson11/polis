@@ -5,7 +5,7 @@ import { DynamoDBDocument } from "@aws-sdk/lib-dynamodb";
 import logger from "../../utils/logger";
 import { getZidFromReport } from "../../utils/parameter";
 import Config from "../../config";
-import { mapConversationToDeliberation, getModelConfig, logAiUsage } from "../../utils/aiUsageLogger";
+import { mapConversationToDeliberation, getModelConfig } from "../../utils/aiUsageLogger";
 import pg from "../../db/pg-query";
 
 // Initialize DynamoDB client
@@ -235,7 +235,7 @@ export async function handle_POST_delphi_jobs(
       conversation_id: String(zid), // Using conversation_id
       deliberation_id: deliberationId || "", // Resolved from Agora for cross-system tracking
       report_id: report_id, // Include report_id for proper S3 paths
-      retry_count: 0,
+      retry_count: 1,
       max_retries: 3,
       timeout_seconds: 14400, // 4 hours default timeout
       job_config: JSON.stringify(jobConfig),
@@ -269,19 +269,6 @@ export async function handle_POST_delphi_jobs(
         TableName: "Delphi_JobQueue",
         Item: jobItem,
       });
-
-      // Fire-and-forget AI usage logging for cost tracking
-      if (deliberationId) {
-        logAiUsage({
-          use_case: 'delphi_report',
-          model: model,
-          provider: primaryProvider || 'anthropic',
-          input_tokens: 0,
-          output_tokens: 0,
-          deliberation_id: deliberationId,
-          origin: 'polis',
-        }).catch(() => {}); // fire-and-forget, never throws
-      }
 
       // Return success with job ID
       res.json({

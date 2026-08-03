@@ -74,13 +74,15 @@ def main():
     # Resolve provider and model for LLM topic naming
     provider_type = os.environ.get("LLM_PROVIDER") or os.environ.get("NARRATIVE_BATCH_PROVIDER") or "anthropic"
     model_name = os.environ.get("LLM_MODEL") or os.environ.get("ANTHROPIC_MODEL")
-    
+
     if not model_name:
         print(f"{YELLOW}No model specified via LLM_MODEL or ANTHROPIC_MODEL env. Skipping LLM topic naming.{NC}")
         model_name = None
-        api_key = None
+    elif provider_type.lower() == "agora":
+        # Agora proxy handles all API keys — skip local key resolution
+        print(f"{YELLOW}Using Agora proxy for topic naming: {model_name}{NC}")
     else:
-        # Resolve API key dynamically for any provider
+        # Resolve API key dynamically for any direct provider
         provider_upper = provider_type.upper().replace('.', '_')
         api_key = (
             os.environ.get(f"{provider_upper}_API_KEY")

@@ -559,9 +559,9 @@ class JobProcessor:
                 # Set status to AWAITING_RECHECK so find_pending_job can pick it up again.
                 self.table.update_item(
                     Key={'job_id': job_id},
-                    UpdateExpression="SET #s = :recheck_status REMOVE lock_expires_at",
+                    UpdateExpression="SET #s = :recheck_status, retry_count = retry_count + :inc REMOVE lock_expires_at",
                     ExpressionAttributeNames={'#s': 'status'},
-                    ExpressionAttributeValues={':recheck_status': 'AWAITING_RECHECK'}
+                    ExpressionAttributeValues={':recheck_status': 'AWAITING_RECHECK', ':inc': 1}
                 )
             else:
                 # For jobs that are finished (completed/failed), just remove the lock.
@@ -795,7 +795,7 @@ class JobProcessor:
             'priority': int(parent_job.get('priority', 50) or 50),
             'conversation_id': str(conversation_id),
             'report_id': report_id,
-            'retry_count': 0,
+            'retry_count': 1,
             'max_retries': 3,
             'timeout_seconds': 14400,
             'job_config': json.dumps(job_config, default=self._decimal_default),
@@ -1395,6 +1395,7 @@ class JobProcessor:
                             f"model={db_config.get('primary_model')}, provider=agora")
                 llm_provider = 'agora'
                 llm_model = db_config.get('primary_model')
+                llm_primary_provider = db_config.get('primary_provider') or ''
                 llm_backup_provider = db_config.get('backup_provider') or ''
                 llm_backup_model = db_config.get('backup_model') or ''
                 llm_fallback_provider = db_config.get('fallback_provider') or ''
@@ -1403,6 +1404,7 @@ class JobProcessor:
                 report_stage_config = self._get_stage_config(job_config, 'REPORT') or {}
                 llm_provider = report_stage_config.get('provider') or os.environ.get('NARRATIVE_BATCH_PROVIDER') or 'anthropic'
                 llm_model = report_stage_config.get('model') or os.environ.get('ANTHROPIC_MODEL')
+                llm_primary_provider = llm_provider
                 llm_backup_provider = report_stage_config.get('backup_provider') or ''
                 llm_backup_model = report_stage_config.get('backup_model') or ''
                 llm_fallback_provider = report_stage_config.get('fallback_provider') or ''
@@ -1411,8 +1413,11 @@ class JobProcessor:
             env = os.environ.copy()
             env['DELPHI_JOB_ID'] = job_id
             env['DELPHI_REPORT_ID'] = str(job.get('report_id') or conversation_id)
+            env['DELIBERATION_ID'] = str(job.get('deliberation_id') or conversation_id)
             env['LLM_PROVIDER'] = str(llm_provider)
             env['LLM_MODEL'] = str(llm_model) if llm_model else ''
+            # When using Agora proxy, pass the actual primary provider for the proxy to route correctly
+            env['LLM_PRIMARY_PROVIDER'] = str(llm_primary_provider) if llm_primary_provider else ''
             env['LLM_BACKUP_PROVIDER'] = str(llm_backup_provider)
             env['LLM_BACKUP_MODEL'] = str(llm_backup_model)
             env['LLM_FALLBACK_PROVIDER'] = str(llm_fallback_provider)
