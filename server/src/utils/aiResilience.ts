@@ -1,5 +1,7 @@
 import CircuitBreaker from 'opossum';
+import Config from '../config';
 import { enqueueAiCall } from './aiProviderQueues';
+import { AgoraProxyError, callViaAgoraProxy, isAgoraProxyConfigured } from './agoraLlmProxyClient';
 
 // ─── Timeout Constants ─────────────────────────────────────
 
@@ -150,6 +152,44 @@ export interface FallbackResult<T> {
   usedModel: string;
   usedProvider: string;
   usedTier: 'primary' | 'backup' | 'fallback';
+  /**
+   * True when the result came from Agora's proxy layer rather than Polis's
+   * local stack. Agora already logged AI usage server-side, so call sites
+   * MUST skip their own logAiUsage when this flag is set (prevents
+   * double-logging). Undefined for local-path results.
+   */
+  proxied?: boolean;
+}
+
+// ─── Agora proxy options ──────────────────────────────────
+
+export interface AgoraChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+/**
+ * Messages and per-call options for the Agora proxy tier. When provided
+ * (and the proxy is enabled), callWithFallback first tries
+ * callViaAgoraProxy before running the local primary/backup/fallback chain.
+ */
+export interface AgoraProxyOptions {
+  /** Chat messages forwarded to Agora's internal LLM proxy endpoint. */
+  messages: AgoraChatMessage[];
+  /** Requested max output tokens (passed through to Agora). */
+  maxTokens?: number;
+  /** Sampling temperature (passed through to Agora). */
+  temperature?: number;
+  /** Ask the provider for a JSON-shaped completion. */
+  jsonMode?: boolean;
+  /** Agora use-case key, used for DB tier fallback + usage logging. */
+  useCase?: string;
+  /** Passed through so Agora can enforce per-deliberation budget checks. */
+  deliberationId?: string;
+  /** Passed through so Agora can enforce per-admin budget checks. */
+  adminUserId?: number;
+  /** Agora queue priority (its BACKGROUND default applies when omitted). */
+  priority?: number;
 }
 
 // ─── callWithFallback ──────────────────────────────────────
@@ -172,6 +212,22 @@ export async function callWithFallback<T>(options: {
    *  backup + fallback tiers combined).  Defaults to 180 s to stay
    *  under the Agora proxy timeout. */
   totalTimeoutMs?: number;
+  /**
+   * When true (default) and `agoraProxy.messages` is provided, the call
+   * first tries Agora's resilience layer via callViaAgoraProxy (queues,
+   * retries, circuit breakers, tier cascade) and only falls through to the
+   * local primary/backup/fallback chain on 502/network/timeout failures.
+   * Genuine auth mismatches (401 / unauthorized with the secret set) rethrow
+   * instead; a missing POLIS_INTERNAL_PROXY_SECRET skips the proxy silently
+   * (standalone). Also gated by POLIS_USE_AGORA_PROXY (default 'true') and
+   * by the integration being configured (backend URL + secret).
+   */
+  useAgoraProxy?: boolean;
+  /**
+   * Messages + options for the Agora proxy tier. When omitted, the proxy is
+   * skipped entirely and only the local fallback chain runs.
+   */
+  agoraProxy?: AgoraProxyOptions;
 }): Promise<FallbackResult<T>> {
   const {
     label,
@@ -187,7 +243,23 @@ export async function callWithFallback<T>(options: {
     maxRetries,
     priority,
     totalTimeoutMs = 180_000,
+    useAgoraProxy,
+    agoraProxy,
   } = options;
+
+  // ─── Agora proxy gate ────────────────────────────────────
+  // The proxy tier runs first only when every gate passes: the caller did
+  // not disable it (useAgoraProxy defaults to true), the env var
+  // POLIS_USE_AGORA_PROXY is not 'false', the integration is configured
+  // (backend URL + POLIS_INTERNAL_PROXY_SECRET), and the caller supplied
+  // messages. A missing secret means Polis runs fully standalone — the
+  // proxy is skipped silently (no log spam) and the existing local chain
+  // below runs (exact pre-proxy behavior).
+  const agoraProxyEnabled =
+    useAgoraProxy !== false &&
+    process.env.POLIS_USE_AGORA_PROXY !== 'false' &&
+    isAgoraProxyConfigured() &&
+    Boolean(agoraProxy && agoraProxy.messages.length > 0);
 
   async function runFallbackChain(): Promise<FallbackResult<T>> {
     const primaryBreaker = getCircuitBreaker(primaryProvider);
@@ -195,6 +267,79 @@ export async function callWithFallback<T>(options: {
     let backupError: unknown;
 
     const startTime = Date.now();
+
+    // ─── Agora proxy tier (before the local chain) ─────────
+    // Budget: callViaAgoraProxy aborts itself at 170 s, which is strictly
+    // shorter than the default totalTimeoutMs of 180 s, so the local chain
+    // below still has its full wall-clock window if the proxy fails.
+    if (agoraProxyEnabled && agoraProxy) {
+      const proxyStart = Date.now();
+      try {
+        const proxyResult = await callViaAgoraProxy({
+          messages: agoraProxy.messages,
+          temperature: agoraProxy.temperature,
+          maxTokens: agoraProxy.maxTokens,
+          jsonMode: agoraProxy.jsonMode,
+          useCase: agoraProxy.useCase,
+          deliberationId: agoraProxy.deliberationId,
+          adminUserId: agoraProxy.adminUserId,
+          priority: agoraProxy.priority ?? priority,
+        });
+
+        if (typeof proxyResult.content !== 'string') {
+          // Defensive — callViaAgoraProxy already validates that content is
+          // a string; treat a non-string as failure and fall through locally.
+          console.warn(
+            `[agora-proxy] ${label}: proxy returned non-string content, falling back to local stack`
+          );
+        } else {
+          logMetrics('agora-proxy', Date.now() - proxyStart, true);
+          return {
+            result: proxyResult.content as unknown as T,
+            usedModel: proxyResult.model,
+            usedProvider: proxyResult.provider,
+            usedTier: proxyResult.tier,
+            proxied: true,
+          };
+        }
+      } catch (proxyErr) {
+        logMetrics('agora-proxy', Date.now() - proxyStart, false, classifyError(proxyErr));
+
+        // 'not_configured' (or the legacy 'missing_secret') means the
+        // integration was never set up — the gate normally prevents the
+        // proxy from running at all, so this is just a defensive note; the
+        // proxy is skipped silently and the local chain below runs. A
+        // genuine 401/'unauthorized' (secret IS set but Agora rejected it)
+        // is a real config mismatch and rethrows — do NOT mask it with the
+        // local stack. Everything else (502 all_tiers_failed, 4xx, network,
+        // timeout, unexpected errors) warns and falls through locally.
+        if (
+          proxyErr instanceof AgoraProxyError &&
+          (proxyErr.code === 'not_configured' || proxyErr.code === 'missing_secret')
+        ) {
+          console.info(
+            `[agora-proxy] ${label}: proxy not configured (${proxyErr.code}), running local stack`
+          );
+        } else if (
+          proxyErr instanceof AgoraProxyError &&
+          (proxyErr.status === 401 || proxyErr.code === 'unauthorized')
+        ) {
+          console.error(
+            `[agora-proxy] auth/config error for ${label}: status=${proxyErr.status} ` +
+            `code=${proxyErr.code} "${proxyErr.message}" — NOT falling back to local stack`
+          );
+          throw proxyErr;
+        }
+
+        const proxyStatus = proxyErr instanceof AgoraProxyError ? proxyErr.status : 'unknown';
+        const proxyCode = proxyErr instanceof AgoraProxyError ? proxyErr.code : 'unknown';
+        console.warn(
+          `[agora-proxy] ${label}: proxy call failed (status=${proxyStatus}, code=${proxyCode}), ` +
+          `falling back to local stack: ${proxyErr instanceof Error ? proxyErr.message : String(proxyErr)}`
+        );
+      }
+    }
+
     try {
       const result = await enqueueAiCall(
         primaryProvider,

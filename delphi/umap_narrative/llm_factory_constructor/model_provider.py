@@ -774,6 +774,206 @@ class AgoraProxyProvider(ModelProvider):
         return models
 
 
+class AgoraProxyError(RuntimeError):
+    """Base class for AgoraProxyBatchClient failures.
+
+    Subclasses RuntimeError so callers written against the plain
+    'RuntimeError' contract keep working unchanged.
+    """
+    pass
+
+
+class AgoraProxyTransportError(AgoraProxyError):
+    """The Agora proxy could not be reached (timeout / connection / request error).
+
+    Callers treat this as an infrastructure failure: fall back to the direct
+    provider SDK path.
+    """
+    pass
+
+
+class AgoraProxyStatusError(AgoraProxyError):
+    """The Agora proxy responded with a non-200 HTTP status.
+
+    Attributes:
+        status_code: The HTTP status returned by the proxy. Callers use this
+            to distinguish real config/budget errors (400/401/402 — do NOT
+            fall back to the direct SDK) from transient server errors
+            (5xx / 502 batch_submission_failed — fallback allowed).
+    """
+
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class BatchNotCompleteError(RuntimeError):
+    """Raised when the Agora batch proxy reports a batch is not yet complete (HTTP 409).
+
+    Callers can catch this to distinguish 'still processing' from real failures.
+    """
+    pass
+
+
+class AgoraProxyBatchClient:
+    """Client for Agora's batch LLM proxy endpoints.
+
+    Mirrors AgoraProxyProvider's URL/key resolution, auth headers, timeout,
+    and error handling exactly so callers get the same failure semantics
+    (RuntimeError on non-200 responses and transport errors; see
+    AgoraProxyStatusError / AgoraProxyTransportError for finer distinctions).
+
+    Endpoints:
+        POST {base}/api/v1/internal/llm/batch                  -> submit
+        GET  {base}/api/v1/internal/llm/batch/{id}/status      -> status
+        GET  {base}/api/v1/internal/llm/batch/{id}/results     -> results
+    """
+
+    def __init__(self, use_case: str = 'delphi_report', deliberation_id: str = None,
+                 timeout: int = 120):
+        """Initialize the client.
+
+        Args:
+            use_case: Agora use-case identifier (usage logging / tier config).
+            deliberation_id: Agora deliberation ID (only sent if set).
+            timeout: Request timeout in seconds (matches AgoraProxyProvider).
+        """
+        self.use_case = use_case
+        self.deliberation_id = deliberation_id
+        self.timeout = timeout
+        agora_backend_url = os.environ.get('AGORA_BACKEND_URL') or os.environ.get('AGORA_API_URL') or 'http://agora-backend:3000'
+        self.base_url = f"{agora_backend_url.rstrip('/')}/api/v1/internal/llm/batch"
+        internal_key = os.environ.get('POLIS_INTERNAL_PROXY_SECRET') or os.environ.get('POLIS_INTERNAL_KEY') or ''
+        self.headers = {
+            'Content-Type': 'application/json',
+            'x-polis-internal-key': internal_key,
+        }
+
+    def _handle_response(self, response, action: str, allow_not_complete: bool = False) -> dict:
+        """Parse a proxy response, raising on non-200 (or BatchNotCompleteError for 409)."""
+        if response.status_code == 200:
+            return response.json()
+        error_text = response.text[:500] if response.text else 'No response body'
+        if response.status_code == 409 and allow_not_complete:
+            raise BatchNotCompleteError(
+                f"Agora batch not complete (status 409): {error_text}"
+            )
+        logger.error(
+            "AgoraProxyBatch: %s failed with status %d: %s",
+            action, response.status_code, error_text,
+        )
+        raise AgoraProxyStatusError(
+            response.status_code,
+            f"Agora proxy returned status {response.status_code}: {error_text}",
+        )
+
+    def _request(self, method: str, url: str, action: str, allow_not_complete: bool = False, **kwargs) -> dict:
+        """Run a request with AgoraProxyProvider-compatible error handling."""
+        try:
+            response = requests.request(method, url, headers=self.headers, timeout=self.timeout, **kwargs)
+            return self._handle_response(response, action, allow_not_complete=allow_not_complete)
+        except BatchNotCompleteError:
+            raise
+        except requests.exceptions.Timeout:
+            logger.error("AgoraProxyBatch: %s timed out after %ds", action, self.timeout)
+            raise AgoraProxyTransportError(f"Agora proxy {action} timed out after {self.timeout} seconds")
+        except requests.exceptions.ConnectionError as e:
+            logger.error("AgoraProxyBatch: %s connection error: %s", action, str(e))
+            raise AgoraProxyTransportError(f"Agora proxy {action} connection failed: {e}")
+        except requests.exceptions.RequestException as e:
+            logger.error("AgoraProxyBatch: %s request error: %s", action, str(e))
+            raise AgoraProxyTransportError(f"Agora proxy {action} request failed: {e}")
+
+    def submit_batch(self, prompts: list) -> dict:
+        """Submit a batch of prompts to the Agora proxy.
+
+        Args:
+            prompts: List of prompt dicts, each with 'custom_id' plus optional
+                'system', 'messages' (list of {role, content}), 'max_tokens',
+                and 'temperature'. Agora resolves provider/model tiers itself
+                from agora_ai_use_case_config (self.use_case) — Delphi does
+                not send model/provider.
+
+        Returns:
+            Parsed JSON response dict with batch_id, provider, model,
+            mode ('native_batch'|'sequential'), prompt_count, etc.
+
+        Raises:
+            RuntimeError: On any non-200 response or transport error.
+        """
+        payload = {'use_case': self.use_case, 'prompts': prompts}
+        if self.deliberation_id:
+            payload['deliberation_id'] = self.deliberation_id
+        logger.info(
+            "AgoraProxyBatch: submitting %d prompts to %s (use_case=%s)",
+            len(prompts), self.base_url, self.use_case,
+        )
+        return self._request('POST', self.base_url, 'batch submission', json=payload)
+
+    def get_batch_status(self, batch_id: str) -> dict:
+        """Check the status of an Agora-proxied batch.
+
+        Returns:
+            Parsed JSON response dict with 'status' in
+            (pending, processing, completed, failed, expired).
+
+        Raises:
+            RuntimeError: On any non-200 response or transport error.
+        """
+        url = f"{self.base_url}/{batch_id}/status"
+        logger.info("AgoraProxyBatch: checking status for batch %s", batch_id)
+        return self._request('GET', url, 'batch status check')
+
+    def get_batch_results(self, batch_id: str) -> dict:
+        """Fetch results for a completed Agora-proxied batch.
+
+        Returns the full response dict:
+            {batch_id, status, results: [{custom_id, content, model, provider,
+            input_tokens, output_tokens, finish_reason}],
+            failures: [{custom_id, error}]}
+
+        Raises:
+            BatchNotCompleteError: If the proxy returns 409 (batch not complete).
+            RuntimeError: On any other non-200 response or transport error
+                (AgoraProxyStatusError / AgoraProxyTransportError subclasses).
+        """
+        url = f"{self.base_url}/{batch_id}/results"
+        logger.info("AgoraProxyBatch: fetching results for batch %s", batch_id)
+        data = self._request('GET', url, 'batch results fetch', allow_not_complete=True)
+        if not isinstance(data, dict) or not isinstance(data.get('results'), list):
+            logger.error(
+                "AgoraProxyBatch: unexpected results payload shape: %s", str(data)[:500],
+            )
+            raise RuntimeError(f"Agora proxy returned unexpected results payload: {str(data)[:500]}")
+        return data
+
+
+def agora_batch_available() -> bool:
+    """Return True when the Agora batch proxy should be used for batch submissions.
+
+    Uses the same check the narrative report batch generator already relies on
+    (LLM_PROVIDER == 'agora' or AGORA_BACKEND_URL set).
+    """
+    return (
+        os.environ.get('LLM_PROVIDER') == 'agora'
+        or bool(os.environ.get('AGORA_BACKEND_URL'))
+    )
+
+
+def agora_batch_configured() -> bool:
+    """Return True when the Agora batch proxy is fully configured (URL + secret).
+
+    Unlike agora_batch_available(), this requires BOTH the backend URL and the
+    internal auth key to be present — used as the proxy-first gate so callers
+    can fall back to the direct SDK cleanly when the proxy is not configured.
+    """
+    url = os.environ.get('AGORA_BACKEND_URL') or os.environ.get('AGORA_API_URL')
+    if not url:
+        return False
+    key = os.environ.get('POLIS_INTERNAL_PROXY_SECRET') or os.environ.get('POLIS_INTERNAL_KEY')
+    return bool(key)
+
+
 def log_ai_usage(
     use_case: str,
     model: str,

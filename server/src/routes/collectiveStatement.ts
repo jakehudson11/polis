@@ -176,7 +176,12 @@ You MUST respond with valid JSON that follows the exact schema above. Each claus
         usage: { input_tokens: result.inputTokens, output_tokens: result.outputTokens },
       };
     };
-    const { result: response, usedModel, usedProvider, usedTier } = await callWithFallback({
+    // Resolve deliberation metadata up front so it can be shared by the
+    // Agora proxy (budget enforcement) and local usage logging.
+    const deliberationId = await mapConversationToDeliberation(zid);
+    const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
+
+    const { result: response, usedModel, usedProvider, usedTier, proxied } = await callWithFallback({
       label: 'collective_statement',
       primaryModel: claudeModel,
       primaryProvider: delphiModelConfig?.primaryProvider ?? 'anthropic',
@@ -188,28 +193,50 @@ You MUST respond with valid JSON that follows the exact schema above. Each claus
       backupFn: async (model, provider) => callProvider(model, provider),
       timeout: AI_TIMEOUTS.REPORT,
       priority: AI_PRIORITY.BACKGROUND,
+      useAgoraProxy: true,
+      agoraProxy: {
+        // Clean system+user messages — no Anthropic prefill. Agora's
+        // jsonMode handles the JSON-shaped completion.
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        maxTokens: 3000,
+        temperature: 0.7,
+        jsonMode: true,
+        useCase: 'delphi_report',
+        deliberationId: deliberationId ?? undefined,
+        adminUserId: adminUserId ?? undefined,
+      },
     });
 
-    // Fire-and-forget AI usage logging
-    (async () => {
-      const deliberationId = await mapConversationToDeliberation(zid);
-      const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
-      await logAiUsage({
-        use_case: 'delphi_report',
-        model: usedModel,
-        provider: usedProvider,
-        input_tokens: (response as any).usage?.input_tokens || 0,
-        output_tokens: (response as any).usage?.output_tokens || 0,
-        deliberation_id: deliberationId ?? undefined,
-        admin_user_id: adminUserId ?? undefined,
-        origin: 'polis',
-      });
-    })().catch(() => {});
+    // Fire-and-forget AI usage logging — Agora already logged usage for
+    // proxied results, so skip our own log to avoid double-logging.
+    if (proxied !== true) {
+      (async () => {
+        await logAiUsage({
+          use_case: 'delphi_report',
+          model: usedModel,
+          provider: usedProvider,
+          input_tokens: (response as any).usage?.input_tokens || 0,
+          output_tokens: (response as any).usage?.output_tokens || 0,
+          deliberation_id: deliberationId ?? undefined,
+          admin_user_id: adminUserId ?? undefined,
+          origin: 'polis',
+        });
+      })().catch(() => {});
+    }
 
-    // Parse the JSON response
-    const responseText =
-      "{" +
-      (response.content[0].type === "text" ? response.content[0].text : "");
+    // Parse the JSON response. Proxied results (Agora jsonMode) arrive as a
+    // complete JSON string. Local results only use the Anthropic prefill
+    // trick (leading "{" prepended back) when the provider that actually
+    // served the call was Anthropic — non-Anthropic local providers return a
+    // complete JSON string, so prepending another "{" would corrupt it.
+    const isAnthropicLocal = !proxied && usedProvider?.toLowerCase() === 'anthropic';
+    const localText = response.content[0].type === "text" ? response.content[0].text : "";
+    const responseText = proxied
+      ? (response as unknown as string)
+      : isAnthropicLocal ? "{" + localText : localText;
 
     try {
       const statementData = JSON.parse(responseText);

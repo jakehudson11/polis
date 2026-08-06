@@ -39,7 +39,7 @@ services:
       - POLIS_DB_ENCRYPTION_KEY=${POLIS_DB_ENCRYPTION_KEY:-w3CIjAYLLk68nFUgn7fl/nGDKQ+3nT9fF+sdL3Rx6QWJAiaAotRTwxCnk+rJJ4zh}
       
       # AI Services (Optional)
-      - LLM_PROVIDER=${LLM_PROVIDER}
+      - LLM_PROVIDER=${LLM_PROVIDER:-agora}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -138,7 +138,7 @@ services:
       - DATABASE_SSL_MODE=${DATABASE_SSL_MODE:-disable}
       
       # AI Services
-      - LLM_PROVIDER=${LLM_PROVIDER}
+      - LLM_PROVIDER=${LLM_PROVIDER:-agora}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -147,6 +147,8 @@ services:
       # Agora Backend Integration
       - AGORA_BACKEND_URL=http://agora-backend:3000
       - POLIS_INTERNAL_PROXY_SECRET=${POLIS_INTERNAL_PROXY_SECRET}
+      # Prefer the volume-mounted package in /app over the baked site-packages copy
+      - PYTHONPATH=/app
       
       # DynamoDB (Optional - for job queue)
       - DYNAMODB_ENDPOINT=${DYNAMODB_ENDPOINT}

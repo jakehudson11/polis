@@ -276,7 +276,12 @@ const getModelResponse = async (
       };
     };
 
-    const { result: response, usedModel, usedProvider, usedTier } = await callWithFallback({
+    // Resolve deliberation metadata up front so it can be shared by the
+    // Agora proxy (budget enforcement) and local usage logging.
+    const deliberationId = zid ? await mapConversationToDeliberation(zid) : null;
+    const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
+
+    const { result: response, usedModel, usedProvider, usedTier, proxied } = await callWithFallback({
       label: 'delphi_report',
       primaryModel,
       primaryProvider,
@@ -288,13 +293,27 @@ const getModelResponse = async (
       backupFn: async (m, p) => callProvider(m, p),
       timeout: AI_TIMEOUTS.REPORT,
       priority: AI_PRIORITY.BACKGROUND,
+      useAgoraProxy: true,
+      agoraProxy: {
+        // Clean system+user messages — no Anthropic prefill. Agora's
+        // jsonMode handles the JSON-shaped completion.
+        messages: [
+          { role: 'system', content: system_lore },
+          { role: 'user', content: prompt_xml },
+        ],
+        maxTokens: 3000,
+        temperature: 0,
+        jsonMode: true,
+        useCase: 'delphi_report',
+        deliberationId: deliberationId ?? undefined,
+        adminUserId: adminUserId ?? undefined,
+      },
     });
 
-    // Fire-and-forget AI usage logging
-    if (zid) {
+    // Fire-and-forget AI usage logging — Agora already logged usage for
+    // proxied results, so skip our own log to avoid double-logging.
+    if (zid && proxied !== true) {
       (async () => {
-        const deliberationId = await mapConversationToDeliberation(zid);
-        const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
         await logAiUsage({
           use_case: 'delphi_report',
           model: usedModel,
@@ -308,13 +327,17 @@ const getModelResponse = async (
       })().catch(() => {});
     }
 
-    // Extract response text based on provider
-    // Anthropic prefill trick: assistant already provided '{', so we prepend it
-    if (usedProvider === 'anthropic') {
-      return `{${(response as any).content[0].text}`;
+    // Proxied results (Agora jsonMode) arrive as a complete JSON string —
+    // no prefill, nothing to prepend.
+    if (proxied) {
+      return response as unknown as string;
     }
-    // Non-anthropic: callAIProvider already normalizes to { content: [{ text }] }
-    return (response as any).content[0].text;
+    // Local results: only Anthropic used the prefill trick (assistant already
+    // provided '{'), so only its text needs the leading "{" prepended back.
+    // Non-Anthropic providers return a complete JSON string as-is.
+    const isAnthropicLocal = !proxied && usedProvider?.toLowerCase() === 'anthropic';
+    const text = (response as any).content[0].text;
+    return isAnthropicLocal ? "{" + text : text;
   } catch (error) {
     logger.error("ERROR IN GETMODELRESPONSE", error);
     return `{

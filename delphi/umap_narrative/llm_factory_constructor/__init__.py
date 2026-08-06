@@ -1,3 +1,3 @@
-from .model_provider import get_model_provider, get_model_provider_with_cascade, ModelProvider, OllamaProvider, AnthropicProvider, OpenAIProvider, DeepSeekProvider, GoogleProvider, AgoraProxyProvider
+from .model_provider import get_model_provider, get_model_provider_with_cascade, ModelProvider, OllamaProvider, AnthropicProvider, OpenAIProvider, DeepSeekProvider, GoogleProvider, AgoraProxyProvider, AgoraProxyBatchClient, AgoraProxyError, AgoraProxyTransportError, AgoraProxyStatusError, BatchNotCompleteError, agora_batch_available, agora_batch_configured
 
-__all__ = ['get_model_provider', 'get_model_provider_with_cascade', 'ModelProvider', 'OllamaProvider', 'AnthropicProvider', 'OpenAIProvider', 'DeepSeekProvider', 'GoogleProvider', 'AgoraProxyProvider']
+__all__ = ['get_model_provider', 'get_model_provider_with_cascade', 'ModelProvider', 'OllamaProvider', 'AnthropicProvider', 'OpenAIProvider', 'DeepSeekProvider', 'GoogleProvider', 'AgoraProxyProvider', 'AgoraProxyBatchClient', 'AgoraProxyError', 'AgoraProxyTransportError', 'AgoraProxyStatusError', 'BatchNotCompleteError', 'agora_batch_available', 'agora_batch_configured']

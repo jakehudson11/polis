@@ -28,7 +28,12 @@ export async function generateSeedComments(
     const model = process.env.OPENAI_MODEL || modelConfig?.primaryModel || "gpt-4o-mini";
     const primaryProvider = modelConfig?.primaryProvider ?? 'openai';
 
-    const { result, usedModel, usedProvider, usedTier } = await callWithFallback({
+    // Resolve deliberation metadata up front so it can be shared by the
+    // Agora proxy (budget enforcement) and local usage logging.
+    const deliberationId = zid ? await mapConversationToDeliberation(zid) : null;
+    const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
+
+    const { result, usedModel, usedProvider, usedTier, proxied } = await callWithFallback({
       label: 'seed_comments',
       primaryModel: model,
       primaryProvider,
@@ -50,13 +55,24 @@ export async function generateSeedComments(
       },
       timeout: AI_TIMEOUTS.STANDARD,
       priority: AI_PRIORITY.BACKGROUND,
+      useAgoraProxy: true,
+      agoraProxy: {
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        maxTokens: 2000,
+        temperature: 0.8,
+        useCase: 'seed_comment_generator',
+        deliberationId: deliberationId ?? undefined,
+        adminUserId: adminUserId ?? undefined,
+      },
     });
 
-    // Fire-and-forget AI usage logging
-    if (zid) {
+    // Fire-and-forget AI usage logging — Agora already logged usage for
+    // proxied results, so skip our own log to avoid double-logging.
+    if (zid && proxied !== true) {
       (async () => {
-        const deliberationId = await mapConversationToDeliberation(zid);
-        const adminUserId = deliberationId ? await getAdminForDeliberation(deliberationId) : null;
         await logAiUsage({
           use_case: 'seed_comment_generator',
           model: usedModel,

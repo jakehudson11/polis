@@ -1,72 +1,10 @@
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { decrypt } from './encryption';
-import pg from '../db/pg-query';
-
-function decryptApiKey(encrypted: string): string {
-  // Heuristic: if the string has exactly 2 colons and looks like base64-encoded
-  // ciphertext (IV:ciphertext:authTag), it is encrypted and MUST be decrypted.
-  // If decryption fails, throw — returning the encrypted blob would cause API
-  // calls to fail with misleading errors (e.g. hitting api.openai.com with a
-  // base64 blob instead of a real API key).
-  const looksEncrypted =
-    typeof encrypted === 'string' &&
-    encrypted.split(':').length === 3 &&
-    encrypted.length > 32;
-
-  if (looksEncrypted) {
-    // This looks like an AES-256-GCM ciphertext. Decryption must succeed.
-    return decrypt(encrypted);
-  }
-
-  // Legacy plaintext key — use as-is
-  return encrypted;
-}
 
 async function resolvePolisProviderCredentials(provider: string): Promise<{ apiKey: string; baseUrl?: string } | null> {
-  try {
-    const rows = await pg.queryP(
-      'SELECT api_key, base_url FROM polis_provider_api_keys WHERE provider = $1 AND is_active = true',
-      [provider.toLowerCase().trim()]
-    );
-    if (rows.length > 0) {
-      let baseUrl: string | undefined = rows[0].base_url || undefined;
-      if (!baseUrl) {
-        try {
-          const providerRows = await pg.queryP(
-            'SELECT base_url FROM polis_ai_providers WHERE LOWER(name) = LOWER($1) AND is_active = true ORDER BY id LIMIT 1',
-            [provider.toLowerCase().trim()]
-          );
-          if (providerRows.length > 0 && providerRows[0].base_url) {
-            baseUrl = providerRows[0].base_url;
-          }
-        } catch {
-          // Silently ignore — provider table lookup is best-effort
-        }
-      }
-      // Warn if a non-standard provider has no base_url — OpenAI client will
-      // default to api.openai.com, which is almost certainly wrong.
-      const standardProviders = new Set(['openai', 'anthropic', 'google', 'gemini', 'deepseek', 'qwen']);
-      if (!baseUrl && !standardProviders.has(provider.toLowerCase().trim())) {
-        console.warn(
-          `[aiClients] Provider "${provider}" has an API key but no base_url configured. ` +
-          `The OpenAI-compatible client will default to https://api.openai.com/v1, ` +
-          `which is likely incorrect. Set base_url in polis_ai_providers or polis_provider_api_keys.`
-        );
-      }
-
-      return {
-        apiKey: decryptApiKey(rows[0].api_key),
-        baseUrl,
-      };
-    }
-    console.warn(`[aiClients] No active API key found in DB for provider "${provider}"`);
-  } catch (err) {
-    console.warn(`[aiClients] Failed to load API key for ${provider} from DB:`, (err as Error).message);
-  }
-
-  // Fall back to env vars (matching Polis env var conventions)
+  // Environment variables are the authoritative (and only) source of API keys
+  // and base URLs for the local LLM stack.
   const normalized = provider.toLowerCase().trim();
   let envKey: string | undefined;
   let envUrl: string | undefined;
@@ -89,7 +27,7 @@ async function resolvePolisProviderCredentials(provider: string): Promise<{ apiK
 
 export async function createClientForProvider(provider: string): Promise<OpenAI | Anthropic | GoogleGenerativeAI> {
   const creds = await resolvePolisProviderCredentials(provider);
-  if (!creds) throw new Error(`No API key configured for "${provider}". Add it via Agora Superuser AI Config → Polis → Available Providers → API Key.`);
+  if (!creds) throw new Error(`No API key configured for "${provider}". Set ${provider.toUpperCase()}_API_KEY (or the provider-specific var) in the Polis .env file.`);
 
   if (provider === 'google') return new GoogleGenerativeAI(creds.apiKey);
   if (provider === 'anthropic') return new Anthropic({ apiKey: creds.apiKey, maxRetries: 0 });

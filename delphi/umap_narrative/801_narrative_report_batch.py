@@ -47,7 +47,7 @@ import traceback  # Added for detailed error tracing
 # Import the model provider
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from umap_narrative.llm_factory_constructor import get_model_provider, AgoraProxyProvider
-from umap_narrative.llm_factory_constructor.model_provider import AnthropicProvider
+from umap_narrative.llm_factory_constructor.model_provider import AnthropicProvider, AgoraProxyBatchClient, AgoraProxyStatusError, AgoraProxyTransportError, BatchNotCompleteError, agora_batch_configured
 
 # Import from local modules
 from polismath_commentgraph.utils.storage import PostgresClient, DynamoDBStorage
@@ -1927,7 +1927,28 @@ class BatchReportGenerator:
             logger.info(f"Job ID: {self.job_id}")
         if self.report_id:
             logger.info(f"Report ID: {self.report_id}")
-        
+
+        # ── Agora batch proxy path (proxy-first) ──
+        # When the Agora batch proxy is configured, submit through it: Agora
+        # resolves provider/model tiers itself (use_case='delphi_report') and
+        # handles sequential mode internally. Fall back to the direct SDK
+        # below ONLY for infrastructure failures (proxy not configured,
+        # connection error, timeout, 5xx, 502 batch_submission_failed).
+        if agora_batch_configured():
+            proxy_result = await self._try_agora_proxy_submit(batch_requests)
+            if proxy_result:
+                logger.info(f"Agora proxy batch submission succeeded: batch_id={proxy_result}")
+                return proxy_result
+            if proxy_result is None:
+                logger.error(
+                    f"Agora proxy rejected the batch (config/budget error 400/401/402); "
+                    f"not falling back to direct {provider} SDK"
+                )
+                return None
+            logger.warning(f"Agora proxy batch submission unavailable; falling back to direct {provider} SDK")
+        else:
+            logger.info("Agora batch proxy not configured (no AGORA_BACKEND_URL/AGORA_API_URL or internal key); using direct SDK")
+
         # Resolve API key for this provider
         provider_upper = provider.upper()
         api_key_env_var = f"{provider_upper}_API_KEY"
@@ -2123,6 +2144,210 @@ class BatchReportGenerator:
         
         return batch.id
 
+    async def _try_agora_proxy_submit(self, batch_requests):
+        """Submit batch requests through the Agora batch proxy (proxy-first path).
+
+        Formats the provider-agnostic batch_requests into the Agora proxy
+        prompt shape (custom_id + system + messages + max_tokens), submits
+        them via AgoraProxyBatchClient, records the batch in DynamoDB, and
+        schedules an AWAITING_NARRATIVE_BATCH status check job (same shape
+        as the Anthropic path).
+
+        Returns:
+            batch_id (str): The Agora batch_id on success.
+            None: The proxy rejected the batch with a config/budget error
+                (HTTP 400/401/402) — callers must NOT fall back to the
+                direct SDK (the error is real).
+            False: Infrastructure failure (proxy unreachable, timeout, 5xx,
+                502 batch_submission_failed, malformed response) — callers
+                may fall back to the direct SDK path.
+        """
+        logger.info(f"Processing Agora-proxied batch of {len(batch_requests)} requests for conversation {self.conversation_id}")
+        if self.job_id:
+            logger.info(f"Job ID: {self.job_id}")
+        if self.report_id:
+            logger.info(f"Report ID: {self.report_id}")
+
+        # Format requests for the Agora batch proxy
+        prompts = []
+        for i, request in enumerate(batch_requests):
+            metadata = request.get('metadata', {})
+            section_name = metadata.get('section_name', 'unknown_section')
+
+            # Build the custom_id with the exact same logic as the Anthropic path
+            if self.job_id and self.job_id in section_name:
+                # Replace the full job_id with just the first 8 characters
+                short_job_id = self.job_id[:8]
+                shortened_section = section_name.replace(self.job_id, short_job_id)
+                custom_id = f"{self.conversation_id}_{shortened_section}"
+            else:
+                # Legacy format or no job_id in section name
+                custom_id = f"{self.conversation_id}_{section_name}"
+
+            safe_custom_id = re.sub(r'[^a-zA-Z0-9_-]', '_', custom_id)
+
+            # Validate custom_id length (max 64 chars, same as Anthropic API)
+            if len(safe_custom_id) > 64:
+                safe_custom_id = safe_custom_id[:64]
+                logger.warning(f"Truncated custom_id to 64 chars: {safe_custom_id}")
+
+            # System prompt with default fallback
+            system_content = request.get('system', '')
+            if not system_content:
+                logger.warning(f"Empty system prompt for request {i}, using default")
+                system_content = "You are a helpful AI assistant analyzing survey data."
+
+            # Extract user text — handle both the [{type: 'text', text}] list
+            # form and the plain-string content form
+            user_content = ''
+            if 'messages' in request and len(request.get('messages', [])) > 0:
+                raw_content = request.get('messages', [])[0].get('content', '')
+                if isinstance(raw_content, list):
+                    text_parts = []
+                    for item in raw_content:
+                        if isinstance(item, dict):
+                            text = item.get('text')
+                            if text:
+                                text_parts.append(str(text))
+                    user_content = '\n'.join(text_parts)
+                elif isinstance(raw_content, str):
+                    user_content = raw_content
+                else:
+                    user_content = str(raw_content) if raw_content else ''
+
+            if not user_content:
+                logger.warning(f"Empty user prompt for request {i}, skipping")
+                continue
+
+            prompt = {
+                'custom_id': safe_custom_id,
+                'system': system_content,
+                'messages': [{'role': 'user', 'content': user_content}],
+                'max_tokens': request.get('max_tokens', 4000),
+            }
+            # Include temperature only if the generator has one configured
+            temperature = getattr(self, 'temperature', None)
+            if temperature is not None:
+                prompt['temperature'] = temperature
+
+            prompts.append(prompt)
+
+        if not prompts:
+            logger.error("No valid prompts to submit through the Agora batch proxy")
+            return False
+
+        logger.info(f"Submitting {len(prompts)} requests to Agora batch proxy")
+
+        # Submit the batch to Agora
+        try:
+            client = AgoraProxyBatchClient(
+                use_case='delphi_report',
+                deliberation_id=self.deliberation_id or os.environ.get('DELIBERATION_ID'),
+            )
+            response = client.submit_batch(prompts=prompts)
+        except BatchNotCompleteError as e:
+            logger.error(f"Agora batch submission returned not-complete (treating as submission failure): {e}")
+            return False
+        except AgoraProxyStatusError as e:
+            if e.status_code in (400, 401, 402):
+                # Config/budget errors are real — never fall back to the direct SDK.
+                logger.error(
+                    f"Agora batch submission rejected with status {e.status_code} ({e}); "
+                    "not falling back to direct SDK"
+                )
+                return None
+            # 5xx (incl. 502 batch_submission_failed) — transient server-side issue.
+            logger.warning(
+                f"Agora batch submission failed with status {e.status_code} ({e}); "
+                "falling back to direct SDK"
+            )
+            return False
+        except AgoraProxyTransportError as e:
+            logger.warning(f"Agora batch proxy unreachable ({e}); falling back to direct SDK")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error submitting batch to Agora proxy: {e}")
+            logger.error(traceback.format_exc())
+            return False
+
+        batch_id = response.get('batch_id')
+        if not batch_id:
+            logger.error(f"Agora batch response missing batch_id: {response}")
+            return False
+
+        # Determine the effective model/provider from the response (Agora may cascade)
+        batch_model = response.get('model') or self.model
+        batch_provider = response.get('provider') or self.provider
+        batch_mode = response.get('mode') or 'sequential'
+        logger.info(
+            f"Successfully submitted batch to Agora proxy: batch_id={batch_id}, "
+            f"provider={batch_provider}, model={batch_model}, mode={batch_mode}, "
+            f"prompt_count={response.get('prompt_count')}"
+        )
+
+        # Store batch information in DynamoDB and schedule the status check job
+        if self.job_id:
+            try:
+                job_table = self.dynamodb.Table('Delphi_JobQueue')
+                batch_id_str = str(batch_id)
+
+                # Update the job with batch information. batch_provider is
+                # stored as 'agora' so 803_check_batch_status routes the job
+                # through the proxy (the Agora batch_id is NOT a provider
+                # batch id). The resolved provider/model from the response
+                # are kept in the logs for diagnostics.
+                job_table.update_item(
+                    Key={'job_id': self.job_id},
+                    UpdateExpression="SET batch_id = :batch_id, #s = :job_status, model = :model, batch_provider = :batch_provider, batch_mode = :batch_mode",
+                    ExpressionAttributeNames={
+                        '#s': 'status'  # Use ExpressionAttributeNames to avoid 'status' reserved keyword
+                    },
+                    ExpressionAttributeValues={
+                        ':batch_id': batch_id_str,
+                        ':job_status': 'PROCESSING',  # Set job status to PROCESSING so poller knows to check batch status
+                        ':model': batch_model,
+                        ':batch_provider': 'agora',
+                        ':batch_mode': batch_mode,
+                    },
+                    ReturnValues="UPDATED_NEW"
+                )
+                logger.info(f"Stored batch_id={batch_id_str}, batch_provider=agora in job {self.job_id}")
+
+                # Look up deliberation_id from the parent job for cross-system tracking
+                deliberation_id = ''
+                try:
+                    parent_resp = job_table.get_item(Key={'job_id': self.job_id})
+                    if 'Item' in parent_resp:
+                        deliberation_id = parent_resp['Item'].get('deliberation_id') or ''
+                except Exception:
+                    pass
+
+                # Schedule a batch status check job (same shape as the Anthropic path)
+                now = datetime.now().isoformat()
+                status_check_job_id = f"batch_check_{self.job_id}_{int(time.time())}"
+                status_job = {
+                    'job_id': status_check_job_id,
+                    'status': 'PENDING',
+                    'job_type': 'AWAITING_NARRATIVE_BATCH',
+                    'batch_job_id': self.job_id,
+                    'batch_id': batch_id_str,
+                    'batch_provider': 'agora',
+                    'conversation_id': self.conversation_id,
+                    'report_id': self.report_id,
+                    'deliberation_id': deliberation_id,
+                    'created_at': now,
+                    'updated_at': now,
+                    'priority': 50,
+                    'version': 1,
+                    'logs': json.dumps({'entries': []})
+                }
+                job_table.put_item(Item=status_job)
+                logger.info(f"Scheduled batch status check job {status_check_job_id} with provider=agora")
+            except Exception as e:
+                logger.error(f"Failed to update DynamoDB for Agora batch: {e}")
+
+        return batch_id
+
     async def submit_batch(self):
         """Prepare and process a batch of topic report requests with provider cascading."""
         logger.info(f"=== Starting batch submission with provider={self.provider} ===")
@@ -2137,6 +2362,11 @@ class BatchReportGenerator:
         except Exception as e:
             logger.error(f"Critical error during batch request preparation: {str(e)}")
             return None
+
+        # Each provider tier below is proxy-first: _submit_anthropic_batch and
+        # _submit_openai_compatible_batch try the Agora batch proxy before the
+        # direct SDK and only fall back for infrastructure failures. Agora
+        # resolves the provider/model cascade itself (use_case='delphi_report').
 
         # Build provider cascade: primary → backup → fallback
         tiers = []
@@ -2157,8 +2387,12 @@ class BatchReportGenerator:
             try:
                 if prov == "anthropic":
                     result = await self._submit_anthropic_batch(mod, batch_requests)
-                elif prov in ("openai", "deepseek", "qwen", "moonshot", "bytedance", "kimi", "z.ai"):
+                elif prov in ("openai", "qwen", "moonshot", "kimi"):
+                    # These providers implement the OpenAI-compatible /v1/batches API
                     result = await self._submit_openai_compatible_batch(prov, mod, batch_requests)
+                elif prov in ("deepseek", "z.ai", "bytedance"):
+                    # These providers have NO native batch API — process sequentially
+                    result = await self._submit_sequential(prov, mod, batch_requests)
                 else:
                     result = await self._submit_sequential(prov, mod, batch_requests)
 
@@ -2184,6 +2418,27 @@ class BatchReportGenerator:
             logger.info(f"Job ID: {self.job_id}")
         if self.report_id:
             logger.info(f"Report ID: {self.report_id}")
+
+        # ── Agora batch proxy path (proxy-first) ──
+        # When the Agora batch proxy is configured, submit through it: Agora
+        # resolves provider/model tiers itself (use_case='delphi_report') and
+        # handles sequential mode internally. Fall back to the direct SDK
+        # below ONLY for infrastructure failures (proxy not configured,
+        # connection error, timeout, 5xx, 502 batch_submission_failed).
+        if agora_batch_configured():
+            proxy_result = await self._try_agora_proxy_submit(batch_requests)
+            if proxy_result:
+                logger.info(f"Agora proxy batch submission succeeded: batch_id={proxy_result}")
+                return proxy_result
+            if proxy_result is None:
+                logger.error(
+                    "Agora proxy rejected the batch (config/budget error 400/401/402); "
+                    "not falling back to direct Anthropic SDK"
+                )
+                return None
+            logger.warning("Agora proxy batch submission unavailable; falling back to direct Anthropic SDK")
+        else:
+            logger.info("Agora batch proxy not configured (no AGORA_BACKEND_URL/AGORA_API_URL or internal key); using direct Anthropic SDK")
 
         # Validate API key presence
         anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
