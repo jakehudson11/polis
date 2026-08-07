@@ -290,12 +290,19 @@ export async function callWithFallback<T>(options: {
           // Defensive — callViaAgoraProxy already validates that content is
           // a string; treat a non-string as failure and fall through locally.
           console.warn(
-            `[agora-proxy] ${label}: proxy returned non-string content, falling back to local stack`
+            `[agora-proxy] ${label}: proxy returned unexpected shape ` +
+            `(content=${typeof proxyResult.content}, inputTokens=${typeof proxyResult.inputTokens}, ` +
+            `outputTokens=${typeof proxyResult.outputTokens}), falling back to local stack`
           );
         } else {
           logMetrics('agora-proxy', Date.now() - proxyStart, true);
+          // The proxy result is a full NormalizedAIResponse-shaped object
+          // (content string + input/output token counts), not a raw string.
+          // Returning only proxyResult.content here broke callers that read
+          // result.content / result.inputTokens / result.outputTokens off the
+          // result (seedCommentGenerator, collectiveStatement, reportNarrative).
           return {
-            result: proxyResult.content as unknown as T,
+            result: proxyResult as unknown as T,
             usedModel: proxyResult.model,
             usedProvider: proxyResult.provider,
             usedTier: proxyResult.tier,

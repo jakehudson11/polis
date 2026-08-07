@@ -327,10 +327,10 @@ const getModelResponse = async (
       })().catch(() => {});
     }
 
-    // Proxied results (Agora jsonMode) arrive as a complete JSON string —
-    // no prefill, nothing to prepend.
+    // Proxied results (Agora jsonMode) arrive as a full object whose
+    // content is a complete JSON string — no prefill, nothing to prepend.
     if (proxied) {
-      return response as unknown as string;
+      return (response as unknown as { content: string }).content;
     }
     // Local results: only Anthropic used the prefill trick (assistant already
     // provided '{'), so only its text needs the leading "{" prepended back.

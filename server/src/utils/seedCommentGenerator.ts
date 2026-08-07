@@ -86,7 +86,9 @@ export async function generateSeedComments(
       })().catch(() => {});
     }
 
-    const content = result.content;
+    // callWithFallback may deliver the raw content string (Agora proxy path)
+    // or a NormalizedAIResponse object (local provider chain) — accept both.
+    const content = typeof result === 'string' ? result : result.content;
     if (!content) {
       throw new Error("No content in OpenAI response");
     }

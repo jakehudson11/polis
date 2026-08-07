@@ -18,7 +18,7 @@ const QUESTION_MAP: { [key: string]: string } = {
   '3': 'What is it about this issue that is so important right now?',
   '4': 'What is within and out of scope for this deliberation?',
   '5': 'What area/sector/field does your organisation operate in? Give us a summary of what you do and don\'t do as an organisation',
-  '6': 'Tell us more about the participants who will be undertaking the deliberation',
+  '6': 'Tell us more about the participants who will be undertaking the deliberation. How knowledgeable are they about the topic? What do they need to learn to deliberate effectively?',
   '7': 'Is there sensitive or potentially harmful context that needs careful framing? Are there assumptions or non-negotiables that we should be aware of?',
   '8': 'Is there anything else that you think is important to share?',
 };

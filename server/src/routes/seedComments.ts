@@ -227,16 +227,29 @@ export async function handle_POST_generate_seed_comments(
       stack: error.stack,
     });
 
-    // Determine appropriate error message
+    // Determine appropriate error message.
+    // NOTE: generateSeedComments() wraps ALL of its errors with the prefix
+    // "Failed to generate seed comments: ", so a generic "Failed to generate"
+    // match would swallow every failure. The specific cause checks below must
+    // therefore be evaluated FIRST, and the default message must NOT blame
+    // model providers — the failure may be a post-processing issue after a
+    // successful LLM call (e.g. empty content), not a provider outage.
     let errorCode = "polis_err_seed_generation_failed";
-    let userMessage = "AI generation failed. All configured model providers returned errors. This is temporary — please try submitting again.";
+    let userMessage = "Seed comment generation failed. This may be temporary — please try again or contact support.";
     if (error.message?.includes("API key")) {
       errorCode = "polis_err_seed_generation_not_configured";
       userMessage = "AI generation failed. No API key configured for the model provider. Please check your AI configuration.";
-    } else if (error.message?.includes("Failed to generate")) {
+    } else if (
+      error.message?.includes("No content") ||
+      error.message?.includes("empty response")
+    ) {
+      // Empty/missing model response after the LLM call succeeded.
+      errorCode = "polis_err_seed_generation_empty_response";
+      userMessage = "The model returned an empty response. Please try again.";
+    } else if (error.message?.includes("AI call failed")) {
+      // All provider tiers failed (callWithFallback threw).
       errorCode = "polis_err_seed_generation_failed";
-    } else if (error.message?.includes("No content")) {
-      userMessage = "AI generation failed. The model returned an empty response. This is temporary — please try submitting again.";
+      userMessage = "AI generation failed. All configured model providers returned errors. This is temporary — please try submitting again.";
     }
 
     failJson(res, 500, errorCode, error, { userMessage });

@@ -234,8 +234,10 @@ You MUST respond with valid JSON that follows the exact schema above. Each claus
     // complete JSON string, so prepending another "{" would corrupt it.
     const isAnthropicLocal = !proxied && usedProvider?.toLowerCase() === 'anthropic';
     const localText = response.content[0].type === "text" ? response.content[0].text : "";
+    // Proxied results are a full object (content string + token counts), so
+    // read the content off the object instead of casting the response itself.
     const responseText = proxied
-      ? (response as unknown as string)
+      ? (response as unknown as { content: string }).content
       : isAnthropicLocal ? "{" + localText : localText;
 
     try {
