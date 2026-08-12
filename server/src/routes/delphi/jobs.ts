@@ -1,7 +1,12 @@
 import { v4 as uuidv4 } from "uuid";
 import { Request, Response } from "express";
 import { DynamoDB } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocument } from "@aws-sdk/lib-dynamodb";
+import {
+  CloudWatchLogsClient,
+  FilterLogEventsCommand,
+  FilteredLogEvent,
+} from "@aws-sdk/client-cloudwatch-logs";
+import { DynamoDBDocument, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import logger from "../../utils/logger";
 import { getZidFromReport } from "../../utils/parameter";
 import Config from "../../config";
@@ -34,6 +39,10 @@ const dynamoDbClient = new DynamoDB(dynamoDbConfig);
 
 // Create DocumentClient
 const docClient = DynamoDBDocument.from(dynamoDbClient);
+
+const logsClient = new CloudWatchLogsClient({
+  region: Config.AWS_REGION || "us-east-1",
+});
 
 // Handler for POST /api/v3/delphi/jobs - Create a new Delphi job
 export async function handle_POST_delphi_jobs(
@@ -528,5 +537,205 @@ export async function handle_GET_delphi_queue_stats(
   } catch (err: any) {
     logger.error("Error fetching Delphi queue stats:", err);
     res.status(500).json({ status: "error", error: err.message || "Internal server error" });
+  }
+}
+
+const getLogs = async (
+  logGroupName: string,
+  startTime: number,
+  endTime: number,
+  filterPattern: string,
+  job_id: string
+): Promise<FilteredLogEvent[]> => {
+  if (Config.awsLogGroupName === "docker") {
+    return [
+      {
+        message: `[DELPHI JOB ${job_id.slice(
+          -8
+        )}] INFO: view logs in console! - ${Date.now()}`,
+      },
+    ];
+  } else {
+    let allEvents: FilteredLogEvent[] = [];
+    let nextToken: string | undefined = undefined;
+
+    try {
+      do {
+        const command = new FilterLogEventsCommand({
+          logGroupName: logGroupName,
+          startTime: startTime,
+          endTime: endTime,
+          filterPattern: filterPattern,
+          nextToken: nextToken,
+        });
+
+        const response = await (logsClient as any).send(command);
+
+        if (response.events) {
+          allEvents.push(...response.events);
+        }
+
+        nextToken = response.nextToken;
+      } while (nextToken);
+
+      return allEvents;
+    } catch (err) {
+      logger.error("Error fetching logs:", err);
+      throw err;
+    }
+  }
+};
+
+// Handler for GET /api/v3/delphi/logs - Get logs for a specific Delphi job
+export async function handle_GET_delphi_job_logs(req: Request, res: Response) {
+  const job_id = req.query.job_id as string;
+  const threeHoursAgo = Date.now() - 3 * 3600 * 1000;
+  try {
+    const logs = await getLogs(
+      Config.awsLogGroupName,
+      threeHoursAgo,
+      Date.now(),
+      `"[DELPHI JOB ${job_id.slice(0, 8)}"`,
+      job_id
+    );
+    return res.json(logs);
+  } catch (error) {
+    logger.error(`Failed to retrieve logs for id ${job_id}`, error);
+    return res
+      .status(500)
+      .json({ status: "error", message: "Failed to retrieve logs" });
+  }
+}
+
+// Handler for GET /api/v3/delphi/queue-position - Get a conversation's position in the Delphi job queue
+export async function handle_GET_delphi_queue_position(req: Request, res: Response) {
+  const report_id = req.query.report_id as string;
+  if (!report_id) {
+    return res.status(400).json({ status: "error", message: "report_id is required" });
+  }
+
+  try {
+    const zid = await getZidFromReport(report_id);
+    if (!zid) {
+      return res.status(404).json({ status: "error", message: "Conversation not found for report" });
+    }
+    const conversation_id = zid.toString();
+
+    const tableName = "Delphi_JobQueue";
+    const statusIndex = "StatusCreatedIndex";
+    const workerCount = parseInt(req.query.workerCount as string || "3", 10);
+
+    // 1. Find this conversation's most recent PENDING or PROCESSING job
+    const pendingResult = await docClient.send(new QueryCommand({
+      TableName: tableName,
+      IndexName: statusIndex,
+      KeyConditionExpression: "#s = :status",
+      ExpressionAttributeNames: { "#s": "status" },
+      ExpressionAttributeValues: { ":status": "PENDING" },
+      ScanIndexForward: true, // oldest first for FIFO order
+    }));
+
+    const pendingJobs = pendingResult.Items || [];
+    
+    // Find this conversation's job
+    const myJobIndex = pendingJobs.findIndex((j: any) => j.conversation_id === conversation_id);
+    
+    // 2. Count active (PROCESSING) jobs
+    const activeResult = await docClient.send(new QueryCommand({
+      TableName: tableName,
+      IndexName: statusIndex,
+      KeyConditionExpression: "#s = :status",
+      ExpressionAttributeNames: { "#s": "status" },
+      ExpressionAttributeValues: { ":status": "PROCESSING" },
+      Select: "COUNT",
+    }));
+
+    const activeCount = activeResult.Count || 0;
+    const pendingCount = pendingJobs.length;
+
+    // 3. If job not in pending, check if it's currently processing
+    let jobId: string | null = null;
+    let queuePosition: number | null = null;
+
+    if (myJobIndex >= 0) {
+      queuePosition = myJobIndex + 1;
+      jobId = pendingJobs[myJobIndex].job_id;
+    } else {
+      // Check if processing
+      const processingResult = await docClient.send(new QueryCommand({
+        TableName: tableName,
+        IndexName: statusIndex,
+        KeyConditionExpression: "#s = :status",
+        ExpressionAttributeNames: { "#s": "status" },
+        ExpressionAttributeValues: { ":status": "PROCESSING" },
+      }));
+      const processingJobs = (processingResult.Items || []).filter((j: any) => j.conversation_id === conversation_id);
+      if (processingJobs.length > 0) {
+        jobId = processingJobs[0].job_id;
+        return res.json({
+          queued: false,
+          active: true,
+          jobId,
+          activeJobCount: activeCount,
+          waitingJobCount: pendingCount,
+          workerCount,
+        });
+      }
+      return res.json({ queued: false });
+    }
+
+    // 4. Compute rolling average from completed jobs (last 50)
+    let rollingAvgSeconds: number | null = null;
+    try {
+      const completedResult = await docClient.send(new QueryCommand({
+        TableName: tableName,
+        IndexName: statusIndex,
+        KeyConditionExpression: "#s = :status",
+        ExpressionAttributeNames: { "#s": "status" },
+        ExpressionAttributeValues: { ":status": "COMPLETED" },
+        ScanIndexForward: false, // newest first
+        Limit: 50,
+      }));
+      
+      const completed = completedResult.Items || [];
+      const durations: number[] = [];
+      for (const job of completed) {
+        const startStr = job.started_at;
+        const endStr = job.completed_at;
+        if (startStr && endStr && startStr.length > 0 && endStr.length > 0) {
+          const start = new Date(startStr).getTime();
+          const end = new Date(endStr).getTime();
+          if (!isNaN(start) && !isNaN(end) && end > start) {
+            durations.push((end - start) / 1000);
+          }
+        }
+      }
+      if (durations.length > 0) {
+        rollingAvgSeconds = Math.ceil(durations.reduce((a, b) => a + b, 0) / durations.length);
+      }
+    } catch (err: any) {
+      logger.warn(`Could not compute rolling average: ${err.message}`);
+    }
+
+    const defaultJobSeconds = 1200; // 20 min default for Delphi jobs
+    const effectiveJobSeconds = rollingAvgSeconds ?? defaultJobSeconds;
+    const effectiveConcurrency = Math.max(1, workerCount);
+    const estimatedWaitSeconds = Math.ceil(
+      ((Math.max(0, queuePosition - 1) + activeCount) / effectiveConcurrency) * effectiveJobSeconds
+    );
+
+    return res.json({
+      queued: true,
+      jobId,
+      queuePosition,
+      waitingJobCount: pendingCount,
+      activeJobCount: activeCount,
+      workerCount,
+      estimatedWaitSeconds,
+      rollingAvgJobSeconds: rollingAvgSeconds,
+    });
+  } catch (err: any) {
+    logger.error(`Error in Delphi queue position: ${err.message}`);
+    return res.status(500).json({ status: "error", message: err.message });
   }
 }

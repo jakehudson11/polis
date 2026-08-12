@@ -268,6 +268,11 @@ export function handle_GET_delphi(req: Request, res: Response) {
                   model_name: item.model_name,
                   created_at: item.created_at,
                   topic_key: item.topic_key,
+                  // Optional summary added by the pipeline; legacy rows won't have it
+                  topic_summary:
+                    typeof item.topic_summary === "string"
+                      ? item.topic_summary
+                      : null,
                 };
               });
 

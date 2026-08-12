@@ -35,6 +35,12 @@ from umap_narrative.llm_factory_constructor.model_provider import log_ai_usage
 
 logger = logging.getLogger(__name__)
 
+# Max rounds of revision per layer before giving up.
+MAX_ROUNDS = 3
+
+# Appended instruction when the LLM response fails to parse (retry once).
+_STRICT_JSON_INSTRUCTION = "Respond with ONLY the JSON object, no markdown, no prose."
+
 # ---------------------------------------------------------------------------
 # DynamoDB helpers
 # ---------------------------------------------------------------------------
@@ -164,6 +170,26 @@ def _compute_similarities(
     return flagged
 
 
+def _max_pairwise_similarity(
+    candidate_name: str,
+    other_names: List[str],
+    embedder,
+) -> float:
+    """Return the max cosine similarity of candidate_name vs other_names.
+
+    Used to gate revisions: a revision is only applied if its max similarity
+    to all OTHER names at the layer strictly decreased vs the old name.
+    """
+    from sklearn.metrics.pairwise import cosine_similarity
+    import numpy as np
+
+    if not other_names:
+        return 0.0
+    embeddings = embedder.encode([candidate_name] + other_names)
+    sims = cosine_similarity(embeddings[0:1], embeddings[1:])[0]
+    return float(sims.max())
+
+
 # ---------------------------------------------------------------------------
 # LLM prompt + response parsing
 # ---------------------------------------------------------------------------
@@ -236,12 +262,18 @@ def _parse_llm_response(response_text: str) -> Optional[Dict[str, Any]]:
 def enforce_topic_distinction(
     conversation_id: str,
     dynamodb_resource=None,
-    similarity_threshold: float = 0.75,
+    similarity_threshold: float = 0.60,
     model_name: str = None,
     provider_type: str = None,
     dry_run: bool = False,
+    skip_summaries: bool = False,
 ) -> Dict[str, Any]:
     """Check and revise topic names within each layer for distinctness.
+
+    Revisions are iterative: up to MAX_ROUNDS rounds per layer, each round
+    only applying candidate revisions whose max pairwise similarity to all
+    other names at the layer strictly decreased. After revision, missing
+    topic_summary rows are backfilled best-effort (unless skip_summaries).
 
     Returns:
         {
@@ -249,6 +281,8 @@ def enforce_topic_distinction(
             "layers_needing_revision": int,
             "topics_revised": int,
             "revisions": {layer_id: {cluster_id: {"old": "...", "new": "..."}, ...}, ...},
+            "summaries_generated": int,
+            "summaries_failed": int,
         }
     """
     from sentence_transformers import SentenceTransformer
@@ -345,95 +379,373 @@ def enforce_topic_distinction(
 
         result["layers_needing_revision"] += 1
 
-        # --- LLM revision ---
-        prompt = _build_revision_prompt(clean_names, flagged_pairs, sample_comments_lookup, layer_id)
-
-        try:
-            llm_response = provider.get_response(
-                system_message="You are a topic-naming specialist. Respond with ONLY valid JSON.",
-                user_message=prompt,
-            )
-        except Exception:
-            logger.warning("Layer %d: LLM call failed, skipping", layer_id, exc_info=True)
-            continue
-
-        # Log AI usage with estimated token counts
-        try:
-            prompt_text = "You are a topic-naming specialist. Respond with ONLY valid JSON." + prompt
-            estimated_input = max(1, len(prompt_text) // 4)
-            estimated_output = max(1, len(llm_response) // 4) if llm_response else 1
-            deliberation_id = os.environ.get('DELPHI_DELIBERATION_ID', '')
-            log_ai_usage(
-                use_case='delphi_report',
-                model=anthropic_model,
-                provider='anthropic',
-                input_tokens=estimated_input,
-                output_tokens=estimated_output,
-                deliberation_id=deliberation_id,
-            )
-        except Exception:
-            logger.warning("Layer %d: failed to log AI usage", layer_id, exc_info=True)
-
-        parsed = _parse_llm_response(llm_response)
-        if not parsed:
-            logger.warning("Layer %d: could not parse LLM response, skipping", layer_id)
-            continue
-
-        revised_map = parsed.get("revised", {})
-        if not revised_map:
-            logger.info("Layer %d: LLM returned no revisions", layer_id)
-            continue
-
-        # --- Apply revisions ---
+        # --- Iterative LLM revision (up to MAX_ROUNDS rounds) ---
         layer_revisions: Dict[str, Dict[str, str]] = {}
-        for cid, new_clean_name in revised_map.items():
-            cid_str = str(cid)
-            if cid_str not in layer_items:
-                logger.warning("Layer %d: LLM returned unknown cluster_id '%s', skipping", layer_id, cid_str)
-                continue
+        round_num = 0
+        while round_num < MAX_ROUNDS:
+            round_num += 1
 
-            old_clean = clean_names.get(cid_str, "")
-            if new_clean_name == old_clean:
-                continue
+            # Re-compute flagged pairs each round; if none, layer passes.
+            flagged_pairs = _compute_similarities(clean_names, embedder, similarity_threshold)
+            if not flagged_pairs:
+                logger.info(
+                    "Layer %d: no pairs exceed threshold %.2f (round %d)",
+                    layer_id, similarity_threshold, round_num,
+                )
+                break
 
-            new_full_name = _apply_prefix(layer_id, cid_str, new_clean_name)
-            old_full_name = str(layer_items[cid_str].get("topic_name", ""))
-            topic_key = str(layer_items[cid_str].get("topic_key", f"layer{layer_id}_{cid_str}"))
+            # --- LLM revision call (one parse-failure retry with stricter instruction) ---
+            prompt = _build_revision_prompt(clean_names, flagged_pairs, sample_comments_lookup, layer_id)
 
-            logger.info("Layer %d: Revised cluster %s topic from '%s' → '%s'", layer_id, cid_str, old_clean, new_clean_name)
+            try:
+                llm_response = provider.get_response(
+                    system_message="You are a topic-naming specialist. Respond with ONLY valid JSON.",
+                    user_message=prompt,
+                )
+            except Exception:
+                logger.warning("Layer %d: LLM call failed, skipping layer", layer_id, exc_info=True)
+                break
 
-            layer_revisions[cid_str] = {"old": old_full_name, "new": new_full_name}
+            # Log AI usage with estimated token counts
+            try:
+                prompt_text = "You are a topic-naming specialist. Respond with ONLY valid JSON." + prompt
+                estimated_input = max(1, len(prompt_text) // 4)
+                estimated_output = max(1, len(llm_response) // 4) if llm_response else 1
+                deliberation_id = os.environ.get('DELPHI_DELIBERATION_ID', '')
+                log_ai_usage(
+                    use_case='delphi_report',
+                    model=model_name,
+                    provider='anthropic',
+                    input_tokens=estimated_input,
+                    output_tokens=estimated_output,
+                    deliberation_id=deliberation_id,
+                )
+            except Exception:
+                logger.warning("Layer %d: failed to log AI usage", layer_id, exc_info=True)
 
-            if not dry_run:
+            parsed = _parse_llm_response(llm_response)
+            if not parsed:
+                logger.warning(
+                    "Layer %d: could not parse LLM response, retrying with stricter instruction", layer_id,
+                )
                 try:
-                    topic_table.update_item(
-                        Key={
-                            "conversation_id": str(conversation_id),
-                            "topic_key": topic_key,
-                        },
-                        UpdateExpression=(
-                            "SET topic_name = :tn, distinction_revised = :dr, original_topic_name = :otn"
-                        ),
-                        ExpressionAttributeValues={
-                            ":tn": new_full_name,
-                            ":dr": True,
-                            ":otn": old_full_name,
-                        },
+                    llm_response = provider.get_response(
+                        system_message="You are a topic-naming specialist. Respond with ONLY valid JSON.",
+                        user_message=prompt + "\n" + _STRICT_JSON_INSTRUCTION,
                     )
                 except Exception:
-                    logger.warning(
-                        "Layer %d, cluster %s: DynamoDB update failed", layer_id, cid_str, exc_info=True,
+                    logger.warning("Layer %d: LLM retry call failed", layer_id, exc_info=True)
+                    parsed = None
+                else:
+                    parsed = _parse_llm_response(llm_response)
+                if not parsed:
+                    logger.warning("Layer %d: could not parse LLM response after retry, skipping round", layer_id)
+                    continue
+
+            revised_map = parsed.get("revised", {})
+            if not revised_map:
+                logger.info("Layer %d: LLM returned no revisions (round %d)", layer_id, round_num)
+                break
+
+            # --- Apply revisions only if max similarity strictly decreases ---
+            applied_this_round = 0
+            for cid, new_clean_name in revised_map.items():
+                cid_str = str(cid)
+                if cid_str not in layer_items:
+                    logger.warning("Layer %d: LLM returned unknown cluster_id '%s', skipping", layer_id, cid_str)
+                    continue
+
+                old_clean = clean_names.get(cid_str, "")
+                new_clean_name = str(new_clean_name).strip()
+                if new_clean_name == old_clean or not new_clean_name:
+                    continue
+
+                other_names = [n for c, n in clean_names.items() if c != cid_str]
+                old_max_sim = _max_pairwise_similarity(old_clean, other_names, embedder)
+                new_max_sim = _max_pairwise_similarity(new_clean_name, other_names, embedder)
+
+                if new_max_sim >= old_max_sim:
+                    logger.info(
+                        "Layer %d: skipped revision for cluster %s ('%s' -> '%s'): "
+                        "max similarity %.3f not strictly below %.3f",
+                        layer_id, cid_str, old_clean, new_clean_name, new_max_sim, old_max_sim,
                     )
+                    continue
+
+                new_full_name = _apply_prefix(layer_id, cid_str, new_clean_name)
+                old_full_name = str(layer_items[cid_str].get("topic_name", ""))
+                topic_key = str(layer_items[cid_str].get("topic_key", f"layer{layer_id}_{cid_str}"))
+
+                logger.info("Layer %d: Revised cluster %s topic from '%s' → '%s'", layer_id, cid_str, old_clean, new_clean_name)
+
+                layer_revisions[cid_str] = {"old": old_full_name, "new": new_full_name}
+                applied_this_round += 1
+
+                if not dry_run:
+                    try:
+                        topic_table.update_item(
+                            Key={
+                                "conversation_id": str(conversation_id),
+                                "topic_key": topic_key,
+                            },
+                            UpdateExpression=(
+                                "SET topic_name = :tn, distinction_revised = :dr, original_topic_name = :otn"
+                            ),
+                            ExpressionAttributeValues={
+                                ":tn": new_full_name,
+                                ":dr": True,
+                                ":otn": old_full_name,
+                            },
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Layer %d, cluster %s: DynamoDB update failed", layer_id, cid_str, exc_info=True,
+                        )
+
+                # Update in-memory clean name so later rounds embed the revised name
+                clean_names[cid_str] = new_clean_name
+
+            if applied_this_round == 0:
+                logger.info("Layer %d: no revisions applied in round %d, stopping", layer_id, round_num)
+                break
 
         if layer_revisions:
             result["revisions"][str(layer_id)] = layer_revisions
             result["topics_revised"] += len(layer_revisions)
 
+    # --- Topic summary generation + backfill (best-effort, respects dry_run) ---
+    if not skip_summaries:
+        try:
+            summary_counts = _backfill_topic_summaries(
+                dynamodb_resource=dynamodb_resource,
+                conversation_id=conversation_id,
+                layers=layers,
+                sample_comments_lookup=sample_comments_lookup,
+                provider=provider,
+                dry_run=dry_run,
+            )
+            result["summaries_generated"] = summary_counts["summaries_generated"]
+            result["summaries_failed"] = summary_counts["summaries_failed"]
+        except Exception:
+            logger.warning("Topic summary backfill failed", exc_info=True)
+            result["summaries_generated"] = 0
+            result["summaries_failed"] = 0
+    else:
+        logger.info("Topic summary backfill skipped (--skip-summaries)")
+        result["summaries_generated"] = 0
+        result["summaries_failed"] = 0
+
     logger.info(
-        "Done. layers_checked=%d, layers_needing_revision=%d, topics_revised=%d",
+        "Done. layers_checked=%d, layers_needing_revision=%d, topics_revised=%d, "
+        "summaries_generated=%d, summaries_failed=%d",
         result["layers_checked"], result["layers_needing_revision"], result["topics_revised"],
+        result["summaries_generated"], result["summaries_failed"],
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Topic summary generation + backfill
+# ---------------------------------------------------------------------------
+
+def _resolve_summary_key(parsed: Optional[Dict[str, Any]], cid: str) -> Optional[str]:
+    """Resolve the LLM JSON key for a cluster id, tolerating label variants.
+
+    The LLM occasionally returns keys like "Cluster 0", "Cluster 0:",
+    "cluster 0", or quoted numeric strings instead of plain "0". Tries, in
+    order:
+      1. exact match on cid (int or str)
+      2. str(cid)
+      3. case-insensitive match after stripping a leading "cluster " prefix
+         and optional trailing colon/whitespace
+      4. fuzzy: any key whose normalized form (lowercase, non-alphanumerics
+         stripped) equals the normalized form of cid or of f"cluster {cid}"
+    Returns the matched summary string (stripped), or None if no key matches.
+    """
+    if not parsed:
+        return None
+
+    # 1. exact match on cid (int or str)
+    exact = parsed.get(cid)
+    if exact is not None:
+        return str(exact).strip() or None
+
+    # 2. str(cid)
+    as_str = parsed.get(str(cid))
+    if as_str is not None:
+        return str(as_str).strip() or None
+
+    def _normalize(text: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", text.lower())
+
+    target = _normalize(str(cid))
+    target_with_prefix = _normalize(f"cluster {cid}")
+    cid_lower = str(cid).lower()
+
+    for key, value in parsed.items():
+        key_str = str(key).strip()
+
+        # 3. strip leading "cluster " (case-insensitive) and trailing colon/whitespace
+        candidate = re.sub(r"^cluster\s*:?\s*", "", key_str, flags=re.IGNORECASE)
+        candidate = candidate.rstrip(": ").strip()
+        if candidate.lower() == cid_lower:
+            return str(value).strip() or None
+
+        # 4. fuzzy normalized match
+        norm = _normalize(key_str)
+        if norm == target or norm == target_with_prefix:
+            return str(value).strip() or None
+
+    return None
+
+
+def _backfill_topic_summaries(
+    dynamodb_resource,
+    conversation_id: str,
+    layers: Dict[int, Dict[str, Dict[str, Any]]],
+    sample_comments_lookup: Dict[str, List[str]],
+    provider,
+    dry_run: bool = False,
+) -> Dict[str, int]:
+    """Generate topic_summary for rows that lack one (idempotent, best-effort).
+
+    layers: {layer_id: {cluster_id: item}} — the same dict built in
+    enforce_topic_distinction. Only rows whose item lacks a non-empty
+    topic_summary are processed. One LLM call per layer (chunked into <=15
+    topics per call), with ONE parse-failure retry using a stricter
+    instruction. Failures are logged and skipped, never raised.
+    """
+    topic_table = dynamodb_resource.Table("Delphi_CommentClustersLLMTopicNames")
+    summaries_generated = 0
+    summaries_failed = 0
+
+    for layer_id in sorted(layers.keys()):
+        layer_items = layers[layer_id]
+
+        # Idempotent: only rows missing a non-empty topic_summary
+        pending: Dict[str, Dict[str, Any]] = {}
+        for cid, item in layer_items.items():
+            if str(item.get("topic_summary") or "").strip():
+                continue
+            pending[cid] = item
+
+        if not pending:
+            logger.info("Summary backfill: layer %d has no rows missing topic_summary", layer_id)
+            continue
+
+        clean_names = {
+            cid: _strip_prefix(str(item.get("topic_name", f"Topic {cid}")))
+            for cid, item in pending.items()
+        }
+
+        # Chunk layers with >15 topics into multiple calls of <=15
+        pending_ids = sorted(pending.keys(), key=lambda x: int(x) if x.isdigit() else x)
+        for chunk_start in range(0, len(pending_ids), 15):
+            chunk = pending_ids[chunk_start:chunk_start + 15]
+
+            cluster_specs = []
+            for cid in chunk:
+                name = clean_names[cid]
+                samples = sample_comments_lookup.get(f"layer{layer_id}_{cid}", [])
+                sample_str = ", ".join(f'"{s}"' for s in samples[:3]) if samples else "(no sample comments)"
+                cluster_specs.append(
+                    f'  Cluster {cid}: "{name}" \u2014 Sample comments: [{sample_str}]'
+                )
+
+            prompt = (
+                "You are writing short summaries of discussion topics for a deliberation platform.\n"
+                "For each cluster below, write a 1-2 sentence \"in a nutshell\" summary of the topic "
+                "based on the sample comments. The summary MUST NOT restate the topic label verbatim, "
+                "must be plain prose, and must NOT include citations or percentages.\n\n"
+                + "\n".join(cluster_specs)
+                + "\n\nRespond with ONLY a JSON object of the form "
+                '{"<cluster_id>": "<summary>", ...}'
+            )
+
+            # One LLM call, one retry with stricter instruction on parse failure
+            parsed = None
+            for attempt in (0, 1):
+                try:
+                    system_message = "You are a topic summarizer. Respond with ONLY valid JSON."
+                    if attempt == 1:
+                        system_message += "\n" + _STRICT_JSON_INSTRUCTION
+                    response_text = provider.get_response(
+                        system_message=system_message,
+                        user_message=prompt,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Summary backfill: layer %d LLM call failed (attempt %d)",
+                        layer_id, attempt + 1, exc_info=True,
+                    )
+                    parsed = None
+                    continue
+                parsed = _parse_llm_response(response_text)
+                if parsed:
+                    break
+                logger.warning(
+                    "Summary backfill: layer %d could not parse response (attempt %d)",
+                    layer_id, attempt + 1,
+                )
+
+            if not parsed:
+                logger.warning("Summary backfill: layer %d failed after retries, skipping", layer_id)
+                summaries_failed += len(chunk)
+                continue
+
+            matched = 0
+            for cid in chunk:
+                summary = _resolve_summary_key(parsed, cid)
+                if not summary:
+                    logger.warning(
+                        "Summary backfill: layer %d cluster %s missing from LLM JSON, skipping",
+                        layer_id, cid,
+                    )
+                    summaries_failed += 1
+                    continue
+                matched += 1
+
+                item = pending[cid]
+                topic_key = str(item.get("topic_key", f"layer{layer_id}_{cid}"))
+
+                if dry_run:
+                    logger.info(
+                        "Summary backfill (dry-run): layer %d cluster %s \u2192 '%s'",
+                        layer_id, cid, summary,
+                    )
+                else:
+                    try:
+                        topic_table.update_item(
+                            Key={
+                                "conversation_id": str(conversation_id),
+                                "topic_key": topic_key,
+                            },
+                            UpdateExpression="SET topic_summary = :ts",
+                            ExpressionAttributeValues={":ts": summary},
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Summary backfill: layer %d cluster %s DynamoDB update failed",
+                            layer_id, cid, exc_info=True,
+                        )
+                        summaries_failed += 1
+                        continue
+                summaries_generated += 1
+                logger.info("Summary backfill: layer %d cluster %s summary written", layer_id, cid)
+
+            if matched == 0 and len(chunk) > 0:
+                keys_preview = ", ".join(repr(k) for k in list(parsed.keys())[:10])
+                logger.warning(
+                    "Summary backfill: layer %d chunk of %d clusters had no matches in LLM JSON "
+                    "(keys: %s); summaries_failed incremented per cluster above",
+                    layer_id, len(chunk), keys_preview,
+                )
+
+    logger.info(
+        "Summary backfill done. summaries_generated=%d, summaries_failed=%d",
+        summaries_generated, summaries_failed,
+    )
+    return {"summaries_generated": summaries_generated, "summaries_failed": summaries_failed}
 
 
 # ---------------------------------------------------------------------------
@@ -451,10 +763,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--conversation_id", required=True, help="Conversation ID / zid")
     parser.add_argument(
-        "--similarity_threshold", type=float, default=0.75,
-        help="Cosine-similarity threshold above which topics are flagged (default: 0.75)",
+        "--similarity_threshold", type=float, default=0.60,
+        help="Cosine-similarity threshold above which topics are flagged (default: 0.60)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Compute and log revisions without writing to DynamoDB")
+    parser.add_argument("--skip-summaries", action="store_true", help="Skip topic summary generation/backfill")
     parser.add_argument("--model", default=None, help="Anthropic model name (overrides ANTHROPIC_MODEL env var)")
     parser.add_argument("--provider", type=str, default=None, help="Provider name (default: anthropic or LLM_PROVIDER env)")
     args = parser.parse_args()
@@ -462,6 +775,7 @@ if __name__ == "__main__":
     result = enforce_topic_distinction(
         conversation_id=args.conversation_id,
         similarity_threshold=args.similarity_threshold,
+        skip_summaries=args.skip_summaries,
         model_name=args.model,
         provider_type=args.provider,
         dry_run=args.dry_run,

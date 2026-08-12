@@ -1364,7 +1364,7 @@ def process_layers_and_create_visualizations(
                 logger.info("Running topic distinction enforcement for conversation %s...", conversation_id)
                 distinction_result = _mod.enforce_topic_distinction(
                     conversation_id=conversation_id,
-                    anthropic_model=anthropic_model,
+                    model_name=anthropic_model,
                 )
                 logger.info(
                     "Topic distinction: layers_checked=%d, revised=%d topics",
