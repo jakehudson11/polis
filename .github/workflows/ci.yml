@@ -1,0 +1,89 @@
+# =============================================================================
+# Polis CI — multi-arch image build/push to GHCR
+#
+# Trigger: push to main. Builds and pushes linux/amd64 + linux/arm64 images:
+#   ghcr.io/jakehudson11/polis-server    (./server, node:24-alpine)
+#   ghcr.io/jakehudson11/polis-math      (./math, clojure:temurin-17)
+#   ghcr.io/jakehudson11/polis-delphi    (./delphi, python 3.12 + torch CPU)
+#
+# The prod VM (ARM, Ubuntu 24.04) pulls these pinned with POLIS_IMAGE_TAG
+# (see docker-compose.prod.yml image: entries); amd64 keeps x64 boxes usable
+# and gives a rollback path.
+#
+# NOTE: polis-delphi compiles hdbscan from source — the arm64 build takes
+# 10+ minutes, that is expected. Build args mirror the prod compose
+# (target: final, USE_CPU_TORCH=true) so CI images match `docker compose
+# build` output.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    name: build & push images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push polis-server
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          file: ./server/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/jakehudson11/polis-server:${{ steps.sha.outputs.short }}
+            ghcr.io/jakehudson11/polis-server:latest
+
+      - name: Build & push polis-math
+        uses: docker/build-push-action@v6
+        with:
+          context: ./math
+          file: ./math/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/jakehudson11/polis-math:${{ steps.sha.outputs.short }}
+            ghcr.io/jakehudson11/polis-math:latest
+
+      # Slow on arm64 (hdbscan compiles from source) — expected, keep it.
+      - name: Build & push polis-delphi
+        uses: docker/build-push-action@v6
+        with:
+          context: ./delphi
+          file: ./delphi/Dockerfile
+          target: final
+          build-args: |
+            USE_CPU_TORCH=true
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/jakehudson11/polis-delphi:${{ steps.sha.outputs.short }}
+            ghcr.io/jakehudson11/polis-delphi:latest

@@ -1,0 +1,115 @@
+# Polis/Delphi — Production override
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Requires Docker Compose v2.24+ (docker compose plugin; uses !reset / !override
+# YAML tags). Verified merge semantics on compose v5.4.0 with `docker compose config`:
+#   - `environment` maps merge key-by-key      -> entries below override the base file
+#   - plain `volumes`/`ports` lists are NOT replaced wholesale: volumes are
+#     concatenated by mount target and empty port lists are ignored
+#     -> the reliable way to remove entries is `!reset` (empty) / `!override` (replace)
+#   - named volumes (minio-data, dynamodb-data, polis-postgres-data) and the delphi
+#     umap_narrative bind mount are intentionally untouched -> persistence preserved
+#
+# Required env (fail-fast via ${VAR:?err} — no dev fallbacks):
+#   AGORA_NETWORK_NAME          external network created by the Agora prod compose,
+#                               e.g. agora-prod_agora-net
+#   MINIO_ROOT_USER             MinIO/S3 access key (replaces minioadmin)
+#   MINIO_ROOT_PASSWORD         MinIO/S3 secret key (replaces minioadmin)
+#   DATABASE_URL                Postgres DSN for polis data
+#   POLIS_JWT_SECRET            JWT signing secret
+#   POLIS_INTERNAL_PROXY_SECRET shared proxy secret with the Agora backend
+#   POLIS_DB_ENCRYPTION_KEY     >= 32 chars AES-256-GCM key (server hard-fails without it)
+#
+# Optional env:
+#   AWS_S3_ENDPOINT             default http://minio:9000 (in-cluster)
+#   AWS_S3_PUBLIC_ENDPOINT      public, browser-reachable S3 endpoint for visualizations
+#   AWS_S3_BUCKET_NAME          default polis-delphi
+#   AGORA_BACKEND_URL           default http://agora-backend:3000 (in-cluster)
+#   PUBLIC_SERVICE_URL          public participation URL used in invite links
+
+services:
+  # --- polis-api -----------------------------------------------------------
+  polis-api:
+    # Pull the CI-built image from GHCR (POLIS_IMAGE_TAG pins a specific
+    # build, defaults to latest). The base file's `build:` stays so local
+    # `docker compose build` still works.
+    image: ghcr.io/jakehudson11/polis-server:${POLIS_IMAGE_TAG:-latest}
+    # Replace the volume list entirely: drops the dev ./server/dist bind mount,
+    # keeps the persistent logs volume.
+    volumes: !override
+      - polis-server-logs:/app/logs
+    # No host-published ports in prod — reachable via the shared docker network
+    # and the reverse proxy (Caddy), same as the Agora backend.
+    ports: !reset []
+    environment:
+      # Required secrets — no dev defaults / fallbacks
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set}
+      - POLIS_JWT_SECRET=${POLIS_JWT_SECRET:?POLIS_JWT_SECRET must be set}
+      - POLIS_INTERNAL_PROXY_SECRET=${POLIS_INTERNAL_PROXY_SECRET:?POLIS_INTERNAL_PROXY_SECRET must be set}
+      - POLIS_DB_ENCRYPTION_KEY=${POLIS_DB_ENCRYPTION_KEY:?POLIS_DB_ENCRYPTION_KEY must be set (>= 32 chars)}
+      # S3/MinIO credentials must match MINIO_ROOT_USER / MINIO_ROOT_PASSWORD
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
+      - AWS_S3_ENDPOINT=${AWS_S3_ENDPOINT:-http://minio:9000}
+      # Prod should set this to the public S3 endpoint (browser-reachable)
+      - AWS_S3_PUBLIC_ENDPOINT=${AWS_S3_PUBLIC_ENDPOINT:-}
+      - AWS_S3_BUCKET_NAME=${AWS_S3_BUCKET_NAME:-polis-delphi}
+      # Agora backend callbacks
+      - AGORA_BACKEND_URL=${AGORA_BACKEND_URL:-http://agora-backend:3000}
+      # Public participation URL for invite links (no localhost fallback in prod)
+      - PUBLIC_SERVICE_URL=${PUBLIC_SERVICE_URL:-}
+      # Fixed prod posture — a stray dev .env cannot flip these
+      - DEV_MODE=false
+      - NODE_ENV=production
+
+  # --- polis-delphi --------------------------------------------------------
+  polis-delphi:
+    # Pull the CI-built image from GHCR (POLIS_IMAGE_TAG pins a specific
+    # build, defaults to latest).
+    image: ghcr.io/jakehudson11/polis-delphi:${POLIS_IMAGE_TAG:-latest}
+    environment:
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set}
+      - POLIS_INTERNAL_PROXY_SECRET=${POLIS_INTERNAL_PROXY_SECRET:?POLIS_INTERNAL_PROXY_SECRET must be set}
+      - AGORA_BACKEND_URL=${AGORA_BACKEND_URL:-http://agora-backend:3000}
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
+      - AWS_S3_ENDPOINT=${AWS_S3_ENDPOINT:-http://minio:9000}
+      - AWS_S3_PUBLIC_ENDPOINT=${AWS_S3_PUBLIC_ENDPOINT:-}
+      - AWS_S3_BUCKET_NAME=${AWS_S3_BUCKET_NAME:-polis-delphi}
+    # Volumes intentionally NOT overridden:
+    #   - ./delphi/umap_narrative bind mount is kept (narrative package/data)
+    #   - named volumes (minio-data, dynamodb-data, polis-postgres-data) inherited from base
+
+  # --- polis-math ----------------------------------------------------------
+  polis-math:
+    # Pull the CI-built image from GHCR (POLIS_IMAGE_TAG pins a specific
+    # build, defaults to latest).
+    image: ghcr.io/jakehudson11/polis-math:${POLIS_IMAGE_TAG:-latest}
+
+  # --- polis-postgres ------------------------------------------------------
+  polis-postgres:
+    # No host publish of 5432 in prod; DB is only reachable over the docker network
+    ports: !reset []
+    # polis-postgres-data named volume inherited (persistence kept)
+
+  # --- dynamodb-local ------------------------------------------------------
+  dynamodb-local:
+    # No host publish of 8000 in prod
+    ports: !reset []
+    # dynamodb-data named volume inherited (persistence kept)
+
+  # --- minio ---------------------------------------------------------------
+  minio:
+    # No host publish of 9000/9001 in prod
+    ports: !reset []
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
+    # minio-data named volume inherited (persistence kept)
+
+networks:
+  agora-net:
+    external: true
+    name: ${AGORA_NETWORK_NAME:-agora-prod_agora-net}
