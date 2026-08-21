@@ -32,7 +32,7 @@ define get_env_vars
 	$(eval export DB_INIT_MODE = $(if $(filter true,$(USE_PRODCLONE)),pdb,db))
 	$(eval export POSTGRES_VOLUME = $(if $(filter true,$(USE_PRODCLONE)),prodclone_data,postgres_data))
 	# Only set COMPOSE_FILE_ARGS if not already set by environment-specific targets
-	$(eval COMPOSE_FILE_ARGS ?= -f docker-compose.yml -f docker-compose.dev.yml)
+	$(eval COMPOSE_FILE_ARGS ?= -f docker-compose.yml)
 	$(eval COMPOSE_FILE_ARGS += $(if $(POSTGRES_DOCKER),--profile postgres,))
 	$(eval COMPOSE_FILE_ARGS += $(if $(LOCAL_SERVICES_DOCKER),--profile local-services,))
 endef
@@ -127,16 +127,16 @@ start-FULL-REBUILD: echo_vars stop rm-ALL ## Remove and restart all Docker conta
 	docker compose ${COMPOSE_FILE_ARGS} --env-file ${ENV_FILE} up ${DETACH_ARG}
 
 rebuild-web: echo_vars ## Rebuild and restart just the file-server container and its static assets, and client-participation-alpha
-	docker compose ${COMPOSE_FILE_ARGS} --env-file ${ENV_FILE} up ${DETACH_ARG} --build --force-recreate file-server client-participation-alpha
+	docker compose ${COMPOSE_FILE_ARGS} --env-file ${ENV_FILE} --profile clients up ${DETACH_ARG} --build --force-recreate file-server client-participation-alpha
 
 rebuild-server: echo_vars ## Rebuild and restart just the server container
-	docker compose ${COMPOSE_FILE_ARGS} --env-file ${ENV_FILE} up ${DETACH_ARG} --build --force-recreate server
+	docker compose ${COMPOSE_FILE_ARGS} --env-file ${ENV_FILE} up ${DETACH_ARG} --build --force-recreate polis-api
 
 rebuild-delphi: echo_vars ## Rebuild and restart just the delphi container
-	docker compose ${COMPOSE_FILE_ARGS} --env-file ${ENV_FILE} up ${DETACH_ARG} --build --force-recreate delphi
+	docker compose ${COMPOSE_FILE_ARGS} --env-file ${ENV_FILE} up ${DETACH_ARG} --build --force-recreate polis-delphi
 
 build-web-assets: ## Build and extract static web assets for cloud deployment to `build` dir
-	docker compose ${COMPOSE_FILE_ARGS} --env-file ${ENV_FILE} create --build --force-recreate file-server
+	docker compose ${COMPOSE_FILE_ARGS} --env-file ${ENV_FILE} --profile clients create --build --force-recreate file-server
 	$(MAKE) extract-web-assets
 
 extract-web-assets: ## Extract static web assets from file-server to `build` dir

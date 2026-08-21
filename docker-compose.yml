@@ -324,6 +324,42 @@ services:
     depends_on:
       - polis-api
 
+  # Static file server: serves the built admin/participation/report assets
+  # to the polis-api reverse-proxy (STATIC_FILES_HOST=file-server). This is
+  # what makes the classic participation UI work at http://localhost:5000/.
+  # No host ports are published: everything is reached through the API's
+  # GET / proxying (also avoids a port clash with client-admin's 8080).
+  file-server:
+    build:
+      context: ./
+      dockerfile: file-server/Dockerfile
+      args:
+        - ADMIN_UIDS=${ADMIN_UIDS}
+        - AUTH_AUDIENCE=${AUTH_AUDIENCE}
+        - AUTH_CLIENT_ID=${AUTH_CLIENT_ID}
+        - AUTH_ISSUER=${AUTH_ISSUER}
+        - AUTH_NAMESPACE=${AUTH_NAMESPACE}
+        - EMBED_SERVICE_HOSTNAME=${EMBED_SERVICE_HOSTNAME}
+        - GA_TRACKING_ID=${GA_TRACKING_ID}
+        - GIT_HASH=${GIT_HASH:-placeholder}
+        - OIDC_CACHE_KEY_PREFIX=${OIDC_CACHE_KEY_PREFIX}
+        - OIDC_CACHE_KEY_ID_TOKEN_SUFFIX=${OIDC_CACHE_KEY_ID_TOKEN_SUFFIX}
+        - SERVICE_URL=${SERVICE_URL}
+        - DD_APPLICATION_ID=${DD_APPLICATION_ID}
+        - DD_CLIENT_TOKEN=${DD_CLIENT_TOKEN}
+        - DD_SITE=${DD_SITE}
+    image: polis/file-server:latest
+    container_name: polis-file-server
+    restart: unless-stopped
+    environment:
+      - PORT=${STATIC_FILES_PORT:-8080}
+    profiles:
+      - clients
+    networks:
+      - polis-net
+    depends_on:
+      - polis-api
+
 networks:
   polis-net:
     driver: bridge
