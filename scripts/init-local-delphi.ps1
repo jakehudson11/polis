@@ -9,7 +9,7 @@ This script is idempotent and safe to run multiple times.
 IMPORTANT: Must be run from the `polis/` directory (where docker-compose.yml lives).
 
 .EXAMPLE
-PS> cd D:\dev\polis
+PS> cd <path-to-polis-repo>
 PS> .\scripts\init-local-delphi.ps1
 
 .NOTES

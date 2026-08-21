@@ -19,8 +19,8 @@ Check what's changed since last release:
 # In polis/
 git log v0.1.0..HEAD --oneline
 
-# In agora/ (if adjacent)
-cd ../agora
+# In agora/ (private repo, if checked out locally)
+cd <path-to-agora-repo>
 git log v0.1.0..HEAD --oneline
 ```
 
@@ -37,8 +37,8 @@ git log v0.1.0..HEAD --oneline
 git status  # Should be clean
 git branch  # Should be on 'main'
 
-# In agora/
-cd ../agora
+# In agora/ (private repo)
+cd <path-to-agora-repo>
 git status
 git branch
 ```
@@ -49,13 +49,13 @@ Releases are typically created from the **Agora repository** using the automated
 
 ### From Agora (Recommended)
 
-See [Agora RELEASING.md](https://github.com/jakehudson11/agora/blob/main/RELEASING.md) for the complete process.
+See the Agora repository's RELEASING.md for the complete process.
 
 Quick summary:
 
 ```powershell
-# From agora repository
-cd d:\dev\agora
+# From the Agora repository (release-paired.ps1 lives in the Agora repository, not Polis)
+cd <path-to-agora-repo>
 .\scripts\release-paired.ps1 -Version "0.2.0"
 ```
 
@@ -104,8 +104,8 @@ git push origin v0.2.0
 
 ### Check GitHub
 
-- **Polis**: https://github.com/jakehudson11/polis/tags
-- **Agora**: https://github.com/jakehudson11/agora/tags
+- **Polis**: the tags page of the Polis repository on GitHub
+- **Agora**: the tags page of the Agora repository on GitHub
 
 Both should show the same tag.
 
@@ -132,8 +132,8 @@ Checkout a specific version to inspect or test:
 # In polis/
 git checkout v0.1.0
 
-# In agora/ (if adjacent)
-cd ../agora
+# In agora/ (private repo, if checked out locally)
+cd <path-to-agora-repo>
 git checkout v0.1.0
 ```
 
@@ -151,8 +151,8 @@ To revert main branch to a previous release:
 git reset --hard v0.1.0
 git push origin main --force
 
-# In agora/
-cd ../agora
+# In agora/ (private repo)
+cd <path-to-agora-repo>
 git reset --hard v0.1.0
 git push origin main --force
 ```
@@ -169,8 +169,8 @@ git revert --no-commit HEAD~1..HEAD
 git commit -m "Revert to v0.1.0 state"
 git push origin main
 
-# In agora/
-cd ../agora
+# In agora/ (private repo)
+cd <path-to-agora-repo>
 git revert --no-commit HEAD~1..HEAD
 git commit -m "Revert to v0.1.0 state"
 git push origin main
@@ -194,9 +194,7 @@ Follow [Semantic Versioning](https://semver.org/):
 
 ### "Repository not found" Error
 
-Ensure you've created the GitHub repositories:
-- https://github.com/jakehudson11/polis
-- https://github.com/jakehudson11/agora
+Ensure you've created the GitHub repositories (Polis and Agora) and that you have access to both.
 
 ### Tag Already Exists
 
@@ -239,6 +237,6 @@ Polis is designed as a standalone open-source platform (AGPL-3.0). Agora consume
 ## See Also
 
 - [Polis README](README.md)
-- [Agora README](https://github.com/jakehudson11/agora)
-- [Agora Release Process](https://github.com/jakehudson11/agora/blob/main/RELEASING.md)
+- Agora README (in the Agora repository)
+- Agora Release Process (documented in the Agora repository's RELEASING.md)
 - [Semantic Versioning](https://semver.org/)

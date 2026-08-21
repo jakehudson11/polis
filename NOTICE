@@ -1,0 +1,25 @@
+Polis — Deliberative Polling Platform
+Copyright (C) 2012-present, The Authors (upstream)
+Copyright (C) 2026, jakehudson11 (modifications)
+
+This repository is a MODIFIED VERSION of Polis, originally developed by the
+Computational Democracy Project (https://github.com/compdemocracy/polis),
+licensed under the GNU Affero General Public License v3 (see LICENSE).
+
+Date of modification: 2026-08-21
+
+Summary of modifications:
+
+1. `server/` is a TypeScript/Node port of the upstream Clojure server (a
+   derivative work of the original server implementation).
+2. `delphi/` is a new Python implementation of the Delphi analysis service
+   (the upstream implementation is Clojure).
+3. An AI-assisted deliberation layer was added, including `aiConfig` for
+   AI provider configuration, seed comment generation, narrative reports,
+   collective statements, and user sync.
+4. Additional database migrations were added beyond the upstream set.
+5. `client-participation-alpha/` contains fork-specific features, including
+   XID external identifiers, a topic-agenda UI, and centralized JWT handling.
+
+`math/` remains the upstream polismath implementation (Clojure) with its
+upstream headers intact.

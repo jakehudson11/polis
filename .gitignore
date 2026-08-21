@@ -80,3 +80,7 @@ _inspect*
 _trigger*
 tmp_*
 null
+
+# Database dumps
+prodclone.dump
+*.dump

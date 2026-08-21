@@ -11,7 +11,7 @@
     "test": "jest"
   },
   "author": "Colin Megill",
-  "license": "",
+  "license": "AGPL-3.0-only",
   "devDependencies": {
     "@babel/core": "^7.22.0",
     "@babel/eslint-parser": "~7.19.1",

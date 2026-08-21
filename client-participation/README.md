@@ -55,4 +55,4 @@ assets, found in the `dist/` folder.
 
 ## Troubleshooting
 
-If you get an error that looks something like `Error: watch /home/csmall/code/polisClientParticipation/js ENOSPC` trying to run, this may be because your system has too many watches active. If you see this, try running `echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p` to increase the number of available watches on your system.
+If you get an error that looks something like `Error: watch <repo-root>/js ENOSPC` trying to run, this may be because your system has too many watches active. If you see this, try running `echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p` to increase the number of available watches on your system.

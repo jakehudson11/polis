@@ -2,6 +2,17 @@
 
 Polis is an AI-powered real-time system for gathering, analyzing and understanding what large groups of people think in their own words, enabled by advanced statistics and machine learning.
 
+## Modifications & Upstream Attribution
+
+This repository is a **modified version** of [Polis](https://github.com/compdemocracy/polis), the open-source deliberation platform by the Computational Democracy Project. Modifications include:
+
+- **Server** (TypeScript): complete port of the upstream Clojure server to TypeScript/Node.js (a derivative work of the original)
+- **Delphi** (Python): new Python implementation of the Delphi analysis service (the upstream is Clojure)
+- **AI extensions**: seed comment generation, AI provider routing, AI usage logging, agora LLM proxy integration, and related migrations
+- **Client-Participation-Alpha**: fork additions including XID external identifiers, topic-agenda UI, and centralized JWT handling
+
+Polis is licensed under AGPL-3.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
 ## What is Polis?
 
 Polis is a platform for gathering feedback and opinions from large groups. It uses conversation clustering algorithms to identify emergent consensus and disagreement patterns among participants. The platform has been used around the world by governments, civic groups, and organizations for:
@@ -60,6 +71,8 @@ cp example.env .env
 ```bash
 docker-compose up
 ```
+
+> **Note**: `docker compose up` starts the API-only stack. Add `docker compose --profile clients up` to also run the four web client UIs (client-admin, client-participation, client-participation-alpha, client-report).
 
 4. **Access the platform**
 - API: http://localhost:5000
@@ -193,7 +206,8 @@ Polis is designed to be a standalone platform that can be consumed by proprietar
 - **API-first design**: All functionality is accessible via documented REST APIs
 
 For details on how Agora integrates with Polis while maintaining separation, see:
-- [Agora Separation Rules](../agora/.cursor/rules/polis-agora-separation.md) (if Agora repo is adjacent)
+
+- Agora and Polis run as separate services communicating only over HTTP/JSON; they share no code and no database.
 - [User Sync API](docs/USER-SYNC-API.md) - How external systems can sync users with Polis
 
 ## Releases & Versioning
