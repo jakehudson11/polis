@@ -9,6 +9,9 @@
 #   - plain `volumes`/`ports` lists are NOT replaced wholesale: volumes are
 #     concatenated by mount target and empty port lists are ignored
 #     -> the reliable way to remove entries is `!reset` (empty) / `!override` (replace)
+#   - `networks` maps also merge by name -> `!override` on a service's `networks:`
+#     replaces the base attachment list wholesale (used to move polis-net-only
+#     services onto the external agora-net in prod)
 #   - named volumes (minio-data, dynamodb-data, polis-postgres-data) and the delphi
 #     umap_narrative bind mount are intentionally untouched -> persistence preserved
 #
@@ -87,23 +90,40 @@ services:
     # Pull the CI-built image from GHCR (POLIS_IMAGE_TAG pins a specific
     # build, defaults to latest).
     image: ghcr.io/jakehudson11/polis-math:${POLIS_IMAGE_TAG:-latest}
+    # Base attaches polis-math to polis-net only; prod replaces that with the
+    # external agora network (shared with the agora backend stack).
+    networks: !override
+      agora-net: {}
 
   # --- polis-postgres ------------------------------------------------------
   polis-postgres:
     # No host publish of 5432 in prod; DB is only reachable over the docker network
     ports: !reset []
+    # Replace the base polis-net attachment (incl. its `postgres` alias) with the
+    # external agora network so agora-backend on agora-prod_agora-net can reach
+    # polis-postgres. Prod DATABASE_URL targets `polis-postgres` by service name.
+    networks: !override
+      agora-net: {}
     # polis-postgres-data named volume inherited (persistence kept)
 
   # --- dynamodb-local ------------------------------------------------------
   dynamodb-local:
     # No host publish of 8000 in prod
     ports: !reset []
+    # Base attaches dynamodb-local to polis-net only; prod replaces that with the
+    # external agora network (matches the live prod container placement).
+    networks: !override
+      agora-net: {}
     # dynamodb-data named volume inherited (persistence kept)
 
   # --- minio ---------------------------------------------------------------
   minio:
     # No host publish of 9000/9001 in prod
     ports: !reset []
+    # Base attaches minio to polis-net only; prod replaces that with the
+    # external agora network (matches the live prod container placement).
+    networks: !override
+      agora-net: {}
     environment:
       - MINIO_ROOT_USER=${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
