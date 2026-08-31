@@ -268,6 +268,13 @@ export async function callWithFallback<T>(options: {
 
     const startTime = Date.now();
 
+    // Set when the proxy tier was attempted but failed and the local chain
+    // is running as fallback. Carried into the final aggregate error so
+    // callers can distinguish "proxy attempted and failed" from "no proxy
+    // attempt at all" (e.g. the seed-comments route must not report a
+    // missing local API key when the real cause was the proxy).
+    let proxyFailureNote: string | null = null;
+
     // ─── Agora proxy tier (before the local chain) ─────────
     // Budget: callViaAgoraProxy aborts itself at 170 s, which is strictly
     // shorter than the default totalTimeoutMs of 180 s, so the local chain
@@ -315,10 +322,21 @@ export async function callWithFallback<T>(options: {
         // 'not_configured' (or the legacy 'missing_secret') means the
         // integration was never set up — the gate normally prevents the
         // proxy from running at all, so this is just a defensive note; the
-        // proxy is skipped silently and the local chain below runs. A
-        // genuine 401/'unauthorized' (secret IS set but Agora rejected it)
-        // is a real config mismatch and rethrows — do NOT mask it with the
-        // local stack. Everything else (502 all_tiers_failed, 4xx, network,
+        // proxy is skipped silently and the local chain below runs.
+        //
+        // Genuine rejections rethrow — do NOT mask them with the local
+        // stack, matching the documented intent of AgoraProxyError (see the
+        // taxonomy in agoraLlmProxyClient.ts):
+        //  - 401/'unauthorized' → secret IS set but Agora rejected it
+        //    (config mismatch).
+        //  - 400 (incl. 'missing_or_invalid_budget_context') → request
+        //    validation failed. A budget-context 400 typically means the
+        //    running polis-api build predates the signed
+        //    x-agora-budget-context header (audit F-801); falling back
+        //    locally would fail the same way and hide the real cause.
+        //  - 402 → Agora budget exceeded for this deliberation/admin user;
+        //    falling back locally would circumvent the agora-side gate.
+        // Everything else (502 all_tiers_failed, other 4xx/5xx, network,
         // timeout, unexpected errors) warns and falls through locally.
         if (
           proxyErr instanceof AgoraProxyError &&
@@ -329,17 +347,30 @@ export async function callWithFallback<T>(options: {
           );
         } else if (
           proxyErr instanceof AgoraProxyError &&
-          (proxyErr.status === 401 || proxyErr.code === 'unauthorized')
+          (proxyErr.status === 400 ||
+            proxyErr.status === 401 ||
+            proxyErr.status === 402 ||
+            proxyErr.code === 'unauthorized' ||
+            proxyErr.code === 'missing_or_invalid_budget_context')
         ) {
           console.error(
-            `[agora-proxy] auth/config error for ${label}: status=${proxyErr.status} ` +
-            `code=${proxyErr.code} "${proxyErr.message}" — NOT falling back to local stack`
+            `[agora-proxy] ${label}: proxy rejected request (status=${proxyErr.status}, ` +
+            `code=${proxyErr.code}) "${proxyErr.message}" — NOT falling back to local stack`
           );
-          throw proxyErr;
+          // Re-throw with a stable, greppable marker so downstream error
+          // mapping (e.g. the seed-comments route) can identify proxy
+          // rejections regardless of the original Agora body shape.
+          throw new AgoraProxyError(
+            proxyErr.status,
+            proxyErr.code,
+            `Agora LLM proxy rejected request (status=${proxyErr.status}, code=${proxyErr.code}): ${proxyErr.message}`,
+            proxyErr.details,
+          );
         }
 
         const proxyStatus = proxyErr instanceof AgoraProxyError ? proxyErr.status : 'unknown';
         const proxyCode = proxyErr instanceof AgoraProxyError ? proxyErr.code : 'unknown';
+        proxyFailureNote = `Agora LLM proxy failed (status=${proxyStatus}, code=${proxyCode})`;
         console.warn(
           `[agora-proxy] ${label}: proxy call failed (status=${proxyStatus}, code=${proxyCode}), ` +
           `falling back to local stack: ${proxyErr instanceof Error ? proxyErr.message : String(proxyErr)}`
@@ -428,7 +459,9 @@ export async function callWithFallback<T>(options: {
       ? `; fallback (${fallbackProvider}/${fallbackModel})`
       : '';
     throw new Error(
-      `AI call failed for ${label}: primary (${primaryProvider}/${primaryModel}): ${primaryMsg}; backup (${backupProvider}/${backupModel}): ${backupMsg}${fallbackTag}`
+      `${proxyFailureNote ? `${proxyFailureNote}; ` : ''}AI call failed for ${label}: ` +
+      `primary (${primaryProvider}/${primaryModel}): ${primaryMsg}; ` +
+      `backup (${backupProvider}/${backupModel}): ${backupMsg}${fallbackTag}`
     );
   }
 

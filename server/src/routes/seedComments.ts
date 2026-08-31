@@ -236,7 +236,25 @@ export async function handle_POST_generate_seed_comments(
     // successful LLM call (e.g. empty content), not a provider outage.
     let errorCode = "polis_err_seed_generation_failed";
     let userMessage = "Seed comment generation failed. This may be temporary — please try again or contact support.";
-    if (error.message?.includes("API key")) {
+
+    // 1. Agora proxy failures FIRST — a proxy rejection (non-200 status or
+    //    an agora error code such as missing_or_invalid_budget_context) must
+    //    NOT be masked as "No API key configured". The local provider env
+    //    keys are empty by design in the agora-proxied deployment, and a 400
+    //    with missing_or_invalid_budget_context typically means the running
+    //    polis-api build predates the signed x-agora-budget-context header
+    //    (audit F-801) — surface the real reason instead.
+    const proxyFailure = describeAgoraProxyFailure(error.message ?? "");
+    if (proxyFailure) {
+      errorCode = "polis_err_seed_generation_agora_proxy_rejected";
+      userMessage =
+        proxyFailure.kind === "rejected"
+          ? `AI generation failed. The Agora AI proxy rejected the request (${proxyFailure.detail}). This usually indicates a proxy configuration or build mismatch — please check the Agora AI proxy configuration and ensure the Polis server is running the latest build.`
+          : `AI generation failed. The Agora AI proxy was unavailable (${proxyFailure.detail}) and the local AI providers also failed. Please try again.`;
+    } else if (error.message?.includes("API key")) {
+      // Genuine missing local API key AND no proxy attempt was made
+      // (standalone deployment, or the proxy is not configured and was
+      // skipped silently).
       errorCode = "polis_err_seed_generation_not_configured";
       userMessage = "AI generation failed. No API key configured for the model provider. Please check your AI configuration.";
     } else if (
@@ -254,6 +272,31 @@ export async function handle_POST_generate_seed_comments(
 
     failJson(res, 500, errorCode, error, { userMessage });
   }
+}
+
+/**
+ * Describe an Agora proxy failure carried in the wrapped error message, or
+ * null when no proxy attempt was made. Matches both shapes produced by the
+ * AI resilience layer (aiResilience.ts):
+ *
+ *  - Rethrown proxy rejection (400/401/402): "Agora LLM proxy rejected
+ *    request (status=400, code=missing_or_invalid_budget_context): ..."
+ *    → kind 'rejected'.
+ *  - Aggregate error after proxy failure + local chain failure: "Agora LLM
+ *    proxy failed (status=502, code=all_tiers_failed); AI call failed ..."
+ *    → kind 'unavailable'.
+ */
+function describeAgoraProxyFailure(
+  message: string
+): { kind: "rejected" | "unavailable"; detail: string } | null {
+  const match = message.match(
+    /Agora LLM proxy (rejected request|failed) \(status=([^,]+), code=([^)]+)\)/
+  );
+  if (!match) return null;
+  return {
+    kind: match[1] === "rejected request" ? "rejected" : "unavailable",
+    detail: `status ${match[2]} (${match[3]})`,
+  };
 }
 
 interface SubmitSeedCommentsRequest extends Request {

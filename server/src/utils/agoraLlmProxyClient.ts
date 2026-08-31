@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+
 import Config from '../config';
 
 // ─── Constants ─────────────────────────────────────────────
@@ -125,6 +127,28 @@ function toTier(value: unknown): AgoraLlmProxyResult['tier'] {
 }
 
 /**
+ * Build the `x-agora-budget-context` header value:
+ * `<deliberationId>|<adminUserId>|<hex-hmac-sha256>`.
+ *
+ * The HMAC input is `<deliberationId>|<adminUserId>` joined with a single
+ * `|` pipe — empty strings when either attribution is absent — keyed with
+ * the same shared secret used for `x-polis-internal-key`
+ * (POLIS_INTERNAL_PROXY_SECRET). Agora validates the signature and derives
+ * budget attribution ONLY from this header (audit F-801); the body's
+ * deliberation_id/admin_user_id fields are client-attested and ignored for
+ * trust. The header is always sent, even for unattributed calls.
+ */
+function buildBudgetContextHeader(
+  deliberationId: string | undefined,
+  adminUserId: number | undefined,
+  secret: string,
+): string {
+  const input = `${deliberationId ?? ''}|${adminUserId ?? ''}`;
+  const hmac = crypto.createHmac('sha256', secret).update(input).digest('hex');
+  return `${input}|${hmac}`;
+}
+
+/**
  * Validate and shape a 200 response body. Throws AgoraProxyError when the
  * body is not JSON or `content` is not a string.
  */
@@ -218,6 +242,7 @@ async function attemptProxyCall(
   endpoint: string,
   secret: string,
   body: Record<string, unknown>,
+  budgetContextHeader: string,
 ): Promise<AgoraLlmProxyResult> {
   const controller = new AbortController();
   const timeoutTimer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
@@ -232,6 +257,7 @@ async function attemptProxyCall(
       headers: {
         'Content-Type': 'application/json',
         'x-polis-internal-key': secret,
+        'x-agora-budget-context': budgetContextHeader,
       },
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -299,6 +325,17 @@ export async function callViaAgoraProxy(params: AgoraLlmProxyParams): Promise<Ag
   const baseUrl = (Config.agoraBackendUrl || 'http://agora-backend:3000').replace(/\/+$/, '');
   const endpoint = `${baseUrl}/api/v1/internal/llm`;
 
+  // Agora trusts ONLY this signed header for budget attribution (audit
+  // F-801): the body's deliberation_id/admin_user_id are client-attested and
+  // ignored for trust. The header is ALWAYS sent — even for unattributed
+  // calls, where empty strings are still signed — keyed with the same shared
+  // secret as `x-polis-internal-key`.
+  const budgetContextHeader = buildBudgetContextHeader(
+    params.deliberationId,
+    params.adminUserId,
+    secret,
+  );
+
   // Client-side guard: Agora resolves tiers from its own use-case config when
   // `use_case` is present; the explicit model+provider pair is the legacy
   // alternative. Refuse to send a request that supplies neither (safety net
@@ -353,7 +390,7 @@ export async function callViaAgoraProxy(params: AgoraLlmProxyParams): Promise<Ag
   // local window, defeating the fail-open design.
   for (let attempt = 1; attempt <= MAX_NETWORK_ATTEMPTS; attempt += 1) {
     try {
-      return await attemptProxyCall(endpoint, secret, body);
+      return await attemptProxyCall(endpoint, secret, body, budgetContextHeader);
     } catch (err) {
       const isRetryableNetworkFailure =
         err instanceof AgoraProxyError &&

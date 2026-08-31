@@ -7,11 +7,29 @@ allowing for easy configuration and switching between model providers.
 """
 
 import os
+import hashlib
+import hmac
 import json
 import logging
 import time
 import requests
 from typing import Dict, List, Optional, Union, Any
+
+
+def build_budget_context_header(deliberation_id, admin_user_id, secret) -> str:
+    """Build the signed x-agora-budget-context header (audit F-801).
+
+    Header format: <deliberation_id>|<admin_user_id>|<hex-hmac-sha256>
+    where the HMAC input is the literal '<deliberation_id>|<admin_user_id>'
+    (empty string when a field is absent; unattributed = '|'), keyed with
+    the same secret as x-polis-internal-key (POLIS_INTERNAL_PROXY_SECRET).
+    The header is REQUIRED even when both fields are absent.
+    """
+    delib = '' if deliberation_id is None else str(deliberation_id)
+    admin = '' if admin_user_id is None else str(admin_user_id)
+    hmac_input = f"{delib}|{admin}"
+    digest = hmac.new(secret.encode('utf-8'), hmac_input.encode('utf-8'), hashlib.sha256).hexdigest()
+    return f"{delib}|{admin}|{digest}"
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -698,11 +716,15 @@ class AgoraProxyProvider(ModelProvider):
         agora_backend_url = os.environ.get('AGORA_BACKEND_URL') or os.environ.get('AGORA_API_URL') or 'http://agora-backend:3000'
         url = f"{agora_backend_url.rstrip('/')}/api/v1/internal/llm"
         
-        # Auth header
+        # Auth headers (x-agora-budget-context is required by audit F-801;
+        # signed with the same secret as x-polis-internal-key)
         internal_key = os.environ.get('POLIS_INTERNAL_PROXY_SECRET') or os.environ.get('POLIS_INTERNAL_KEY') or ''
         headers = {
             'Content-Type': 'application/json',
             'x-polis-internal-key': internal_key,
+            'x-agora-budget-context': build_budget_context_header(
+                self.deliberation_id, self.admin_user_id, internal_key,
+            ),
         }
         
         # Build payload with all tier config
@@ -844,9 +866,14 @@ class AgoraProxyBatchClient:
         agora_backend_url = os.environ.get('AGORA_BACKEND_URL') or os.environ.get('AGORA_API_URL') or 'http://agora-backend:3000'
         self.base_url = f"{agora_backend_url.rstrip('/')}/api/v1/internal/llm/batch"
         internal_key = os.environ.get('POLIS_INTERNAL_PROXY_SECRET') or os.environ.get('POLIS_INTERNAL_KEY') or ''
+        # x-agora-budget-context is required on POST /batch (audit F-801).
+        # admin_user_id is not available in this client -> signed as absent.
         self.headers = {
             'Content-Type': 'application/json',
             'x-polis-internal-key': internal_key,
+            'x-agora-budget-context': build_budget_context_header(
+                self.deliberation_id, None, internal_key,
+            ),
         }
 
     def _handle_response(self, response, action: str, allow_not_complete: bool = False) -> dict:
