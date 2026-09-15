@@ -256,6 +256,77 @@ def _parse_llm_response(response_text: str) -> Optional[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# LLM model + provider resolution
+# ---------------------------------------------------------------------------
+
+# The model name and the provider name are a MATCHED PAIR and must be resolved
+# from the same (job-scoped) configuration. Resolving them with two independent
+# precedence chains let them disagree in production: the provider came from the
+# job-scoped LLM_PRIMARY_PROVIDER (Z.AI) while the model fell back to the
+# container-global ANTHROPIC_MODEL (claude-sonnet-4-20250514), so every
+# delphi_report call failed and silently degraded to a slower backup tier.
+# Do not split these two lookups apart again.
+
+
+def resolve_model_and_provider(
+    model_name: Optional[str] = None,
+    provider_type: Optional[str] = None,
+) -> Tuple[str, str, bool]:
+    """Resolve the matched (model, provider) pair for this invocation.
+
+    Precedence (an explicit CLI --model argument always wins):
+      Agora route:  --model  >  LLM_MODEL (job-scoped)  >  ANTHROPIC_MODEL
+      direct SDK:   --model  >  ANTHROPIC_MODEL                        (unchanged)
+
+    The Agora route's provider is job-scoped (LLM_PRIMARY_PROVIDER ->
+    LLM_PROVIDER_ACTUAL), so its model must prefer the job-scoped LLM_MODEL
+    before the container-global ANTHROPIC_MODEL. ANTHROPIC_MODEL stays a valid
+    source for the direct-SDK paths, and a last-resort fallback for Agora.
+
+    Returns:
+        (model_name, provider_name, is_agora_route), where provider_name is the
+        provider to hand to the chosen constructor (the Agora primary provider on
+        the Agora route, otherwise the resolved provider type).
+    """
+    provider = (
+        provider_type
+        or os.environ.get("LLM_PROVIDER")
+        or os.environ.get("NARRATIVE_BATCH_PROVIDER")
+        or "anthropic"
+    )
+
+    if provider.lower() == "agora":
+        primary_provider = (
+            os.environ.get("LLM_PRIMARY_PROVIDER")
+            or os.environ.get("LLM_PROVIDER_ACTUAL")
+            or "anthropic"
+        )
+        job_model = os.environ.get("LLM_MODEL")
+        resolved_model = model_name or job_model or os.environ.get("ANTHROPIC_MODEL")
+        if not resolved_model:
+            raise ValueError(
+                "No model could be resolved for the Agora route: pass --model or set the "
+                "job-scoped LLM_MODEL. Attempted in order: --model argument, LLM_MODEL, "
+                "ANTHROPIC_MODEL (all unset). The model must be chosen together with the "
+                "job-scoped provider chain LLM_PRIMARY_PROVIDER/LLM_PROVIDER_ACTUAL."
+            )
+        if not model_name and not job_model:
+            logger.warning(
+                "Agora route has no job-scoped LLM_MODEL; falling back to the "
+                "container-global ANTHROPIC_MODEL=%r while job-scoped provider=%r — "
+                "verify the model/provider pair is valid.",
+                resolved_model, primary_provider,
+            )
+        return resolved_model, primary_provider, True
+
+    # Direct-SDK path: behaviour unchanged (ANTHROPIC_MODEL is legitimate here).
+    resolved_model = model_name or os.environ.get("ANTHROPIC_MODEL")
+    if not resolved_model:
+        raise ValueError("model_name must be provided or ANTHROPIC_MODEL env var set")
+    return resolved_model, provider, False
+
+
+# ---------------------------------------------------------------------------
 # Core logic
 # ---------------------------------------------------------------------------
 
@@ -296,21 +367,20 @@ def enforce_topic_distinction(
             kwargs["endpoint_url"] = endpoint
         dynamodb_resource = boto3.resource("dynamodb", **kwargs)
 
-    model_name = model_name or os.environ.get("ANTHROPIC_MODEL")
-    if not model_name:
-        raise ValueError("model_name must be provided or ANTHROPIC_MODEL env var set")
-    
-    provider_type = provider_type or os.environ.get("LLM_PROVIDER") or os.environ.get("NARRATIVE_BATCH_PROVIDER") or "anthropic"
-    
-    if provider_type.lower() == "agora":
+    # Model and provider are resolved together from one precedence chain so they cannot
+    # disagree; see resolve_model_and_provider above for the incident this prevents.
+    model_name, provider_name, is_agora_route = resolve_model_and_provider(
+        model_name, provider_type,
+    )
+
+    if is_agora_route:
         # When LLM_PROVIDER is 'agora', route through AgoraProxyProvider directly.
         # Agora's backend handles cascade/fallback — Delphi does NOT try providers locally.
-        primary_provider = os.environ.get("LLM_PRIMARY_PROVIDER") or os.environ.get("LLM_PROVIDER_ACTUAL") or "anthropic"
         deliberation_id = os.environ.get("DELIBERATION_ID") or os.environ.get("DELPHI_DELIBERATION_ID") or None
         
         provider = AgoraProxyProvider(
             model=model_name,
-            provider=primary_provider,
+            provider=provider_name,
             backup_model=os.environ.get("LLM_BACKUP_MODEL") or None,
             backup_provider=os.environ.get("LLM_BACKUP_PROVIDER") or None,
             fallback_model=os.environ.get("LLM_FALLBACK_MODEL") or None,
@@ -320,7 +390,7 @@ def enforce_topic_distinction(
         )
     else:
         config = {
-            'provider': provider_type,
+            'provider': provider_name,
             'model': model_name,
         }
         provider = get_model_provider_with_cascade(config)

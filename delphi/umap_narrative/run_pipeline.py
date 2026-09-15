@@ -35,6 +35,56 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def resolve_job_llm_route():
+    """Resolve (provider_type, model_name, primary_provider) from ONE consistent chain.
+
+    The model name and the provider name are a MATCHED PAIR and must come from the
+    same (job-scoped) configuration. Resolving them with two independent precedence
+    chains let them disagree in production: the provider came from the job-scoped
+    LLM_PRIMARY_PROVIDER (Z.AI) while the model fell back to the container-global
+    ANTHROPIC_MODEL (claude-sonnet-4-20250514), so every delphi_report call failed
+    and silently degraded to a slower backup tier. On the Agora route the job-scoped
+    LLM_MODEL therefore wins over the container-global ANTHROPIC_MODEL; do not split
+    these two lookups apart again.
+    """
+    provider_type = (
+        os.environ.get("LLM_PROVIDER")
+        or os.environ.get("NARRATIVE_BATCH_PROVIDER")
+        or "anthropic"
+    )
+
+    if provider_type.lower() == "agora":
+        primary_provider = (
+            os.environ.get("LLM_PRIMARY_PROVIDER")
+            or os.environ.get("LLM_PROVIDER_ACTUAL")
+            or "anthropic"
+        )
+        # Job-scoped LLM_MODEL first; the container-global ANTHROPIC_MODEL is only a
+        # last resort because it can belong to a different provider than
+        # primary_provider above.
+        model_name = (
+            os.environ.get("LLM_MODEL")
+            or os.environ.get("ANTHROPIC_MODEL")
+            or os.environ.get("NARRATIVE_BATCH_MODEL")
+        )
+        if not os.environ.get("LLM_MODEL"):
+            logger.warning(
+                "Agora route has no job-scoped LLM_MODEL; resolved model=%r with "
+                "job-scoped provider=%r — verify the model/provider pair is valid.",
+                model_name, primary_provider,
+            )
+        return provider_type, model_name, primary_provider
+
+    # Direct-SDK path (unchanged): ANTHROPIC_MODEL is a legitimate source here.
+    model_name = (
+        os.environ.get("LLM_MODEL")
+        or os.environ.get("ANTHROPIC_MODEL")
+        or os.environ.get("NARRATIVE_BATCH_MODEL")
+    )
+    return provider_type, model_name, provider_type
+
+
 def setup_environment(
     db_host=None, db_port=None, db_name=None, db_user=None, db_password=None
 ):
@@ -333,14 +383,14 @@ def generate_cluster_topic_labels(
 
     # LLM topic naming via cascade
     if enable_llm_topic_naming and comment_texts is not None and layer is not None:
-        # Build config from env vars (set by job_poller from REPORT stage config)
-        llm_provider = os.environ.get("LLM_PROVIDER") or os.environ.get("NARRATIVE_BATCH_PROVIDER") or "anthropic"
-        llm_model = os.environ.get("LLM_MODEL") or os.environ.get("ANTHROPIC_MODEL") or os.environ.get("NARRATIVE_BATCH_MODEL")
+        # Build config from env vars (set by job_poller from REPORT stage config).
+        # Model and provider come from one shared resolution so they stay a matched
+        # pair (see resolve_job_llm_route).
+        llm_provider, llm_model, primary_provider = resolve_job_llm_route()
         
         if llm_provider.lower() == "agora":
             # When LLM_PROVIDER is 'agora', route through AgoraProxyProvider directly.
             # Agora's backend handles cascade/fallback — Delphi does NOT try providers locally.
-            primary_provider = os.environ.get("LLM_PRIMARY_PROVIDER") or os.environ.get("LLM_PROVIDER_ACTUAL") or "anthropic"
             deliberation_id = os.environ.get("DELIBERATION_ID") or os.environ.get("DELPHI_DELIBERATION_ID") or None
             
             provider_instance = AgoraProxyProvider(
@@ -1253,6 +1303,9 @@ def process_layers_and_create_visualizations(
         total_llm_succeeded = 0
         total_llm_attempted = 0
         total_clusters = 0
+        # The model this job will actually use (same resolution as the naming calls
+        # below), so persisted metadata is not misleading on the Agora route.
+        _job_provider, job_llm_model, _job_primary_provider = resolve_job_llm_route()
         for layer_idx, cluster_layer in enumerate(cluster_layers):
             try:
                 characteristics = layer_data[layer_idx]["characteristics"]
@@ -1300,12 +1353,14 @@ def process_layers_and_create_visualizations(
                         logger.info(
                             f"Storing LLM topic names for layer {layer_idx} in DynamoDB..."
                         )
-                        model_name = os.environ.get("ANTHROPIC_MODEL")
+                        # Persist the model this job actually used (job-scoped LLM_MODEL wins
+                        # over the container-global ANTHROPIC_MODEL on the Agora route).
+                        model_name = job_llm_model
                         llm_topic_models = DataConverter.batch_convert_llm_topic_names(
                             conversation_id,
                             cluster_labels,
                             layer_idx,
-                            model_name=model_name,  # Model used for LLM topic naming
+                            model_name=model_name,  # Model actually used for LLM topic naming
                             job_id=job_id,  # Pass job_id
                         )
                         result = dynamo_storage.batch_create_llm_topic_names(
@@ -1360,11 +1415,13 @@ def process_layers_and_create_visualizations(
                 _mod = importlib.util.module_from_spec(_spec)
                 _spec.loader.exec_module(_mod)
 
-                anthropic_model = os.environ.get("ANTHROPIC_MODEL")
+                # Pass the job-scoped model (LLM_MODEL first) instead of the container-global
+                # ANTHROPIC_MODEL, so 752 pairs it with the job-scoped provider chain rather
+                # than crossing a Z.AI-style provider with an Anthropic model name.
                 logger.info("Running topic distinction enforcement for conversation %s...", conversation_id)
                 distinction_result = _mod.enforce_topic_distinction(
                     conversation_id=conversation_id,
-                    model_name=anthropic_model,
+                    model_name=job_llm_model,
                 )
                 logger.info(
                     "Topic distinction: layers_checked=%d, revised=%d topics",

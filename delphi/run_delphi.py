@@ -285,6 +285,12 @@ def main():
     ]
     if verbose_arg:
         distinction_command.append(verbose_arg)
+    # Pass the resolved model (job-scoped LLM_MODEL wins over the container-global
+    # ANTHROPIC_MODEL). Without this, 752 falls back to the stale container-global
+    # ANTHROPIC_MODEL, which can pair with the job's separate provider setting (e.g.
+    # Z.AI + a Sonnet model), failing every call and degrading to the slow backup tier.
+    if model_name:
+        distinction_command.append(f"--model={model_name}")
 
     distinction_process = subprocess.run(distinction_command)
     distinction_exit_code = distinction_process.returncode

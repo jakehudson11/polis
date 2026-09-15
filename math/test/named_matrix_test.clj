@@ -3,6 +3,7 @@
 (ns named-matrix-test
   (:use test-helpers)
   (:require [clojure.test :refer :all]
+            [clojure.core.matrix :as matrix]
             [polismath.math.named-matrix :refer :all]
             [polismath.math.named-matrix :as nm]))
 
@@ -126,6 +127,35 @@
         (is (= (colnames nmat)
                ["c1" "c2" "c3" "c4"])
             "there new participants should be in rows")))))
+
+
+(deftest test-update-nmat-empty-regression
+  ;; An empty update on an empty NamedMatrix used to create a degenerate [] matrix (shape [0]),
+  ;; on which the next update-nmat threw IndexOutOfBoundsException from dimension-count.
+  (testing "an empty update leaves the nmat updatable"
+    (let [nmat (update-nmat (update-nmat (named-matrix) []) [[0 0 1] [0 1 -1]])]
+      (is (= [0] (rownames nmat)))
+      (is (= [0 1] (colnames nmat)))
+      (is (= [1 2] (matrix/shape (get-matrix nmat))))
+      (is (m=? (get-matrix nmat) [[1 -1]]))))
+  (testing "repeated empty updates are safe"
+    (let [nmat (-> (named-matrix)
+                   (update-nmat [])
+                   (update-nmat [])
+                   (update-nmat [[5 7 -1] [5 8 1]]))]
+      (is (= [5] (rownames nmat)))
+      (is (= [7 8] (colnames nmat)))
+      (is (= [1 2] (matrix/shape (get-matrix nmat))))
+      (is (m=? (get-matrix nmat) [[-1 1]]))))
+  (testing "empty update on a healthy matrix still pads and assocs as before"
+    (let [nmat (update-nmat (update-nmat real-nmat []) [["p4" "c4" 1]])]
+      (is (= ["p1" "p2" "p3" "p4"] (rownames nmat)))
+      (is (= ["c1" "c2" "c3" "c4"] (colnames nmat)))
+      (is (m=? (get-matrix nmat)
+             [[ 0   1    nil  nil]
+              [-1   1    1    nil]
+              [-1   nil  nil  nil]
+              [ nil nil  nil  1]])))))
 
 
 (deftest matrix-subsetting-test

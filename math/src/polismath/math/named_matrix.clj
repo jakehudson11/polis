@@ -111,7 +111,9 @@
         new-col-index
         ; Construct new matrix
         (as-> (.matrix this) mat
-          (if (= 0 (matrix/dimension-count mat 1))
+          ; Note: (empty? mat) first, because a degenerate [] matrix (which an empty update
+          ; can leave behind) has no dimension 1 and (matrix/dimension-count mat 1) throws on it
+          (if (or (empty? mat) (= 0 (matrix/dimension-count mat 1)))
             ; If the matrix is empty, just create the shape needed
             (matrix/coerce [[]]
               (matrix/broadcast nil [new-row-count new-col-count]))
