@@ -219,7 +219,12 @@ services:
 
   # MinIO (S3-compatible storage for Delphi)
   minio:
-    image: minio/minio:latest
+    # quay.io, NOT Docker Hub: docker.io/minio/minio was removed/gated
+    # upstream (mid-Sept 2026) and `docker compose pull` now fails with
+    # `pull access denied for minio/minio`. Official registry, same project.
+    # Keep the floating tag: the running volume may carry metadata newer than
+    # a pinned release, and MinIO refuses to start against newer on-disk formats.
+    image: quay.io/minio/minio:latest
     container_name: minio
     command: server /data --console-address ":9001"
     restart: unless-stopped
