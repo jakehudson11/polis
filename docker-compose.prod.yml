@@ -21,6 +21,17 @@
 #   MINIO_ROOT_USER             MinIO/S3 access key (replaces minioadmin)
 #   MINIO_ROOT_PASSWORD         MinIO/S3 secret key (replaces minioadmin)
 #   DATABASE_URL                Postgres DSN for polis data
+#                               MUST use the `postgres://` scheme (NOT
+#                               `postgresql://`): polis-math parses it with
+#                               #"postgres://(?:(.+):(.*)@)?([^:]+)(?::(\d+))?/(.+)"
+#                               (math/src/polismath/components/postgres.clj ->
+#                               create-hikari-datasource). `postgresql://` does
+#                               not match, so host/db become nil, the JDBC URL
+#                               degrades to localhost:5432 and the math worker
+#                               reboot-loops with "Connection refused" while
+#                               polis-api/delphi look fine. polis-api
+#                               (node-postgres) and delphi (psycopg2/libpq)
+#                               accept both schemes, so one DSN serves all three.
 #   POLIS_JWT_SECRET            JWT signing secret
 #   POLIS_INTERNAL_PROXY_SECRET shared proxy secret with the Agora backend
 #   POLIS_DB_ENCRYPTION_KEY     >= 32 chars AES-256-GCM key (server hard-fails without it)
@@ -65,7 +76,36 @@ services:
       - PUBLIC_SERVICE_URL=${PUBLIC_SERVICE_URL:-}
       # Fixed prod posture — a stray dev .env cannot flip these
       - DEV_MODE=false
+      # polis's redirectIfNotHttps gate (server/src/utils/domain.ts) rejects
+      # plain-HTTP requests that arrive without an x-forwarded-proto header.
+      # Agora calls this service directly over the shared docker network
+      # (POLIS_API_URL=http://polis-api:5000), so with the gate active every GET
+      # became a 302 to https://polis-api:5000 (axios follows it, hits TLS on a
+      # plain-HTTP port -> EPROTO) and every POST a 400 "Please use HTTPS when
+      # submitting data." — polis looked dead to the app. USE_NETWORK_HOST=true
+      # is polis's own switch for an internal, non-TLS deployment; polis-api
+      # publishes no host port and Caddy does not route to it, so nothing new
+      # becomes externally reachable.
+      - USE_NETWORK_HOST=true
+      # polis builds its CORS/domain whitelist from API_PROD_HOSTNAME (default
+      # "pol.is") and uses it for absolute links. The Agora polis proxy forwards
+      # the browser's Origin/Referer, so without this entry every
+      # browser-originated /api/v3/* call is rejected 500 "CORS: domain not
+      # whitelisted".
+      - API_PROD_HOSTNAME=${POLIS_PUBLIC_HOSTNAME:-app.agoracooperative.org}
       - NODE_ENV=production
+      # polis-api and polis-math MUST agree on MATH_ENV: it is the namespace
+      # string stored in math_main / math_ticks / worker_tasks, written by math
+      # as `(name math-env)` -> math-env-string
+      # (math/src/polismath/components/config.clj:121) and read verbatim by the
+      # API (server/src/routes/math.ts uses Config.mathEnv, i.e. the raw env
+      # string). The BASE FILE'S DEFAULTS DISAGREE: polis-api has
+      # ${MATH_ENV:-dev} (docker-compose.yml:72) while polis-math has
+      # ${MATH_ENV:-prod} (docker-compose.yml:111). With MATH_ENV absent from
+      # the operator's .env the API queries a namespace math never writes and
+      # every conversation silently shows no math results. Pinned on both
+      # services here so a stray/absent .env value cannot split them.
+      - MATH_ENV=prod
 
   # --- polis-delphi --------------------------------------------------------
   polis-delphi:
@@ -81,6 +121,43 @@ services:
       - AWS_S3_ENDPOINT=${AWS_S3_ENDPOINT:-http://minio:9000}
       - AWS_S3_PUBLIC_ENDPOINT=${AWS_S3_PUBLIC_ENDPOINT:-}
       - AWS_S3_BUCKET_NAME=${AWS_S3_BUCKET_NAME:-polis-delphi}
+      # Explicit DB coordinates. The base file derives these from POSTGRES_HOST,
+      # which is a dev-only name: prod attaches polis-postgres to agora-net ONLY
+      # (see the !override below), so the base file's `postgres` network alias
+      # does not exist here and POSTGRES_HOST=postgres:5432 from a dev-style .env
+      # resolves to nothing. Worse, an unset/empty host is silently rewritten to
+      # `localhost` by delphi/umap_narrative/run_pipeline.py (and the 700_/702_/
+      # 801_ scripts), while the narrative paths also default DATABASE_NAME to
+      # `polisDB_prod_local_mar14` - so a missing POSTGRES_HOST produced
+      # "connection refused" or a wrong-database error instead of a clear
+      # failure. job_poller.py (the container's CMD) prefers DATABASE_URL
+      # (PostgresConfig.from_env), so only the narrative/visualisation paths were
+      # exposed. Var NAMES verified in the delphi source:
+      # polismath/database/postgres.py:74-78, umap_narrative/run_pipeline.py:94-106,
+      # umap_narrative/801_narrative_report_batch.py:2794-2798,
+      # polismath_commentgraph/utils/storage.py:65-69.
+      - DATABASE_HOST=polis-postgres
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=${POSTGRES_DB:-polis}
+      - DATABASE_USER=${POSTGRES_USER:-polis}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD}
+      # Fixed posture: postgres:16 in-cluster speaks no TLS, and the base file
+      # would honour a stray DATABASE_SSL_MODE=require from the operator .env,
+      # which fails every connection. This encodes the base file's effective
+      # default (${DATABASE_SSL_MODE:-disable}) explicitly.
+      - DATABASE_SSL_MODE=disable
+      # polis-api (the job ENQUEUER) defaults to the in-cluster dynamodb-local
+      # (base file: DYNAMODB_ENDPOINT=${DYNAMODB_ENDPOINT:-http://dynamodb-local:8000})
+      # while the base delphi service passes the same variable through with NO
+      # default. If the operator's .env leaves it empty, the API enqueues into
+      # dynamodb-local while delphi falls through to the real AWS endpoint with
+      # MinIO credentials (job_poller.py: `raw_endpoint or os.environ
+      # .get('DYNAMODB_ENDPOINT')` -> None -> boto3 default), i.e. two different
+      # queues and a crash-looping poller. Mirroring the API's default keeps the
+      # pair symmetric and also turns on the image's local-setup branch
+      # (delphi/Dockerfile CMD branches on this variable: create_dynamodb_tables
+      # + setup_minio before starting the poller).
+      - DYNAMODB_ENDPOINT=${DYNAMODB_ENDPOINT:-http://dynamodb-local:8000}
     # Volumes intentionally NOT overridden:
     #   - ./delphi/umap_narrative bind mount is kept (narrative package/data)
     #   - named volumes (minio-data, dynamodb-data, polis-postgres-data) inherited from base
@@ -90,6 +167,13 @@ services:
     # Pull the CI-built image from GHCR (POLIS_IMAGE_TAG pins a specific
     # build, defaults to latest).
     image: ghcr.io/jakehudson11/polis-math:${POLIS_IMAGE_TAG:-latest}
+    # Same namespace string as polis-api (see the MATH_ENV note on polis-api):
+    # the base file's per-service defaults disagree (dev for the api, prod for
+    # math here) and a mismatch means the API never finds math's rows.
+    # math-env also drives math's inferred webserver-url, so prod is the correct
+    # label (MATH_ENV options: prod, preprod, dev).
+    environment:
+      - MATH_ENV=prod
     # Base attaches polis-math to polis-net only; prod replaces that with the
     # external agora network (shared with the agora backend stack).
     networks: !override
@@ -108,6 +192,11 @@ services:
 
   # --- dynamodb-local ------------------------------------------------------
   dynamodb-local:
+    # The base file gives this service no restart policy while every other
+    # long-running service has one; that is why prod's container was found
+    # "Exited" and never came back after the host rebooted. polis-delphi
+    # depends_on it, so pin the policy here.
+    restart: unless-stopped
     # No host publish of 8000 in prod
     ports: !reset []
     # Base attaches dynamodb-local to polis-net only; prod replaces that with the
