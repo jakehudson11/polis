@@ -23,6 +23,14 @@ services:
     volumes:
       - ./server/dist:/app/dist
       - polis-server-logs:/app/logs
+      # Google Cloud service account for Vertex AI (aiplatform.googleapis.com).
+      # Read-only, mounted at the same container path the Agora compose files use.
+      # The HOST path is configurable so no machine-specific path is baked in;
+      # the default mirrors Agora's layout (JSON at the repo root). Note Docker
+      # creates the host path as a DIRECTORY when the file is absent, so create
+      # the JSON before `docker compose up` once Vertex is switched on. Unused
+      # while GOOGLE_VERTEX_ENABLED is off.
+      - ${GOOGLE_APPLICATION_CREDENTIALS_HOST:-./google-tts-service-account.json}:/run/secrets/google-tts-service-account.json:ro
     restart: unless-stopped
     environment:
       # Database
@@ -45,6 +53,15 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL=${OPENAI_MODEL}
       - GOOGLE_GEMINI_API_KEY=${GOOGLE_GEMINI_API_KEY}
+      # Google Vertex AI - OPT-IN and currently DISABLED.
+      # isGoogleVertexEnabled() only returns true for GOOGLE_VERTEX_ENABLED=true;
+      # until that switch is set, Polis keeps using the legacy API-key (Gemini
+      # Developer API) path above and the service-account JSON is simply unused.
+      # Uncomment only once the Vertex path has been runtime-verified.
+      # - GOOGLE_VERTEX_ENABLED=true
+      - GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/google-tts-service-account.json
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - GOOGLE_VERTEX_LOCATION=${GOOGLE_VERTEX_LOCATION:-global}
       # Additional AI providers
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}

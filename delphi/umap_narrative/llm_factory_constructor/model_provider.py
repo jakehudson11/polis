@@ -606,50 +606,41 @@ class DeepSeekProvider(ModelProvider):
         return ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro", "deepseek-v4-flash"]
 
 class GoogleProvider(ModelProvider):
-    """Provider for Google Gemini models."""
+    """RETIRED 2026-09-25: direct Google AI Studio (Gemini Developer API) provider.
+
+    Delphi no longer calls Google LLM endpoints directly:
+      * Every Delphi LLM call is forced through Agora's proxy
+        (LLM_PROVIDER='agora' in scripts/job_poller.py); Agora owns provider
+        selection, retries and the primary/backup/fallback cascade.
+      * requirements.lock ships zero Google packages, so the old lazy
+        `import google.generativeai` could only ever raise ModuleNotFoundError.
+      * The Developer API -> Vertex AI migration is an auth/endpoint change
+        implemented in Agora (polis/server/src/utils/aiGoogleVertex.ts,
+        opt-in via GOOGLE_VERTEX_ENABLED=true). It is deliberately NOT
+        reimplemented in this module.
+
+    The class is deliberately left in place (importable, still exported from
+    the package __init__) so existing imports keep working, but constructing or
+    calling it now fails loudly instead of falling through to a silently wrong
+    provider.
+    """
 
     def __init__(self, model_name: str = None, api_key: Optional[str] = None):
-        self.model_name = model_name
-        self.api_key = api_key or os.environ.get("GOOGLE_GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-        if not self.api_key:
-            logger.warning("No Google API key provided. Set GOOGLE_GEMINI_API_KEY env var.")
+        raise NotImplementedError(
+            "GoogleProvider is retired and can no longer be constructed. Delphi LLM "
+            "traffic is routed through the Agora proxy (LLM_PROVIDER='agora'); "
+            "configure providers in agora_ai_use_case_config instead."
+        )
 
     def get_response(self, system_message: str, user_message: str) -> str:
-        if not self.api_key:
-            raise ValueError("No Google API key provided.")
-        
-        logger.info(f"Using Google model: {self.model_name}")
-        
-        import google.generativeai as genai
-        genai.configure(api_key=self.api_key)
-        
-        # Gemini uses system_instruction in the model constructor
-        model = genai.GenerativeModel(
-            model_name=self.model_name,
-            system_instruction=system_message,
+        raise NotImplementedError(
+            "GoogleProvider is retired; route LLM calls through AgoraProxyProvider."
         )
-        
-        retryable_statuses = {429, 500, 502, 503}
-        last_exc = None
-        
-        for attempt in range(5):
-            try:
-                response = model.generate_content(user_message)
-                return response.text
-            except Exception as e:
-                last_exc = e
-                status = getattr(e, 'code', None) or getattr(getattr(e, 'response', None), 'status_code', None)
-                if status not in retryable_statuses:
-                    break
-                sleep_s = min(30.0, 1.5 * (2 ** attempt))
-                logger.warning(f"Google transient error (attempt {attempt+1}/5); retrying in {sleep_s:.1f}s")
-                time.sleep(sleep_s)
-                continue
-        
-        raise RuntimeError(f"Google API request failed after retries: {last_exc}")
-    
+
     def list_available_models(self) -> List[str]:
-        return ["gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
+        raise NotImplementedError(
+            "GoogleProvider is retired; read the model list from agora_ai_use_case_config."
+        )
 
 
 class AgoraProxyProvider(ModelProvider):
@@ -1129,12 +1120,15 @@ def get_model_provider(provider_type: str = None, model_name: str = None) -> Mod
         logger.info(f"Using DeepSeek provider with model: {model_name}")
         return DeepSeekProvider(model_name=model_name, api_key=api_key)
     elif provider_type and provider_type.lower() in ("google", "gemini"):
-        model_name = model_name or os.environ.get("GOOGLE_MODEL") or os.environ.get("GEMINI_MODEL")
-        if not model_name:
-            raise ValueError("Model name must be specified or GOOGLE_MODEL env var must be set")
-        api_key = os.environ.get("GOOGLE_GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-        logger.info(f"Using Google provider with model: {model_name}")
-        return GoogleProvider(model_name=model_name, api_key=api_key)
+        # RETIRED 2026-09-25: the GoogleProvider path is dormant (no Google
+        # packages in requirements.lock) and Delphi LLM traffic is forced
+        # through the Agora proxy. Reject explicitly rather than silently
+        # falling through to the Ollama default below.
+        raise ValueError(
+            "Provider 'google'/'gemini' is retired for Delphi: direct Google Gemini "
+            "calls are no longer supported. Use LLM_PROVIDER='agora' (Google->Vertex "
+            "AI handling lives in Agora) or another supported provider."
+        )
     elif provider_type and provider_type.lower() == "agora":
         model_name = model_name or os.environ.get("ANTHROPIC_MODEL")
         if not model_name:

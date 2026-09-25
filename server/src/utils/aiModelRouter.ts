@@ -1,4 +1,4 @@
-import { createClientForProvider } from './aiClients';
+import { createClientForProvider, getGeminiVertexClient, isGeminiVertexMode } from './aiClients';
 
 export interface NormalizedAIResponse {
   content: string;
@@ -42,6 +42,39 @@ function clampTemperatureForProvider(provider: string, model: string, temperatur
   return temperature;
 }
 
+/**
+ * Google Vertex AI branch for the google provider: the same request/response
+ * contract as the API-key branch, issued through @google/genai in Vertex mode.
+ * Callers must have checked isGeminiVertexMode() first.
+ *
+ * Deliberately mirrors the legacy branch: identical system+user prompt
+ * flattening, no generation config (the legacy branch forwarded none, so the
+ * model defaults still apply), identical response / usageMetadata extraction.
+ */
+async function callGoogleVertex(
+  model: string,
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
+): Promise<NormalizedAIResponse> {
+  const systemMsg = messages.find(m => m.role === 'system')?.content ?? '';
+  const userMsgs = messages.filter(m => m.role !== 'system');
+  const prompt = [systemMsg, ...userMsgs.map(m => m.content)].filter(Boolean).join('\n\n');
+
+  // `config` is empty on purpose: GenerateContentConfig is FLAT in @google/genai
+  // (no nested generationConfig), and the API-key branch passed no request
+  // params, so the Vertex path keeps the model defaults rather than silently
+  // introducing a maxOutputTokens cap the legacy path never had.
+  const result = await Promise.race([
+    getGeminiVertexClient().models.generateContent({ model, contents: prompt, config: {} }),
+    createTimeoutRejection('google', PROVIDER_HTTP_TIMEOUT_MS),
+  ]);
+
+  return {
+    content: result.text,
+    inputTokens: result.usageMetadata?.promptTokenCount ?? 0,
+    outputTokens: result.usageMetadata?.candidatesTokenCount ?? 0,
+  };
+}
+
 export async function callAIProvider(
   model: string,
   provider: string,
@@ -51,6 +84,16 @@ export async function callAIProvider(
   const rawTemperature = options.temperature ?? 0.5;
   const temperature = clampTemperatureForProvider(provider, model, rawTemperature);
   const { maxTokens = 1024 } = options;
+
+  // Vertex opt-in gate. When GOOGLE_VERTEX_ENABLED is true and a GCP project
+  // resolves, the google provider runs on @google/genai with service-account
+  // OAuth and never needs GOOGLE_GEMINI_API_KEY. With the switch off (the Polis
+  // default) this is false and control falls straight through to the untouched
+  // API-key path below, including its createClientForProvider() credential check.
+  if (provider === 'google' && isGeminiVertexMode()) {
+    return callGoogleVertex(model, messages);
+  }
+
   const client = await createClientForProvider(provider);
 
   if (provider === 'google') {

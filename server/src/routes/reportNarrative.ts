@@ -21,7 +21,7 @@ import { PathLike } from "node:fs";
 import config from "../config";
 import logger from "../utils/logger";
 import { logAiUsage, getModelConfig, mapConversationToDeliberation, getAdminForDeliberation } from "../utils/aiUsageLogger";
-import { getOpenAIClient, getAnthropicClient, getGeminiClient } from "../utils/aiClients";
+import { getOpenAIClient, getAnthropicClient, getGeminiClient, isGeminiVertexMode, getGeminiVertexClient } from "../utils/aiClients";
 import { callWithFallback, retryWithBackoff, AI_TIMEOUTS } from "../utils/aiResilience";
 import { enqueueAiCall, AI_PRIORITY } from "../utils/aiProviderQueues";
 import { callAIProvider } from "../utils/aiModelRouter";
@@ -121,8 +121,25 @@ const anthropic = (() => {
   try { return getAnthropicClient(); } catch { return null; }
 })();
 
+/**
+ * Google client handle for this module.
+ *
+ * Vertex opt-in gate, same shape as the google branch in utils/aiModelRouter.ts:
+ * when the operator has switched Polis to Vertex (`GOOGLE_VERTEX_ENABLED=true`
+ * plus a resolvable GCP project) the handle is the `@google/genai` client, whose
+ * service-account OAuth is the only thing that can reach aiplatform.googleapis.com.
+ * Otherwise it stays the legacy `@google/generative-ai` API-key client.
+ *
+ * Switch OFF is a strict no-op: isGeminiVertexMode() then returns false on the
+ * env read alone (it never loads utils/aiGoogleVertex), so the expression below is
+ * exactly the previous `try { getGeminiClient() } catch { null }` -- including the
+ * null handle when GOOGLE_GEMINI_API_KEY is unset.
+ */
 const genAI = (() => {
-  try { return getGeminiClient(); } catch { return null; }
+  try {
+    if (isGeminiVertexMode()) return getGeminiVertexClient();
+    return getGeminiClient();
+  } catch { return null; }
 })();
 
 const getCommentsAsXML = async (
@@ -264,7 +281,15 @@ const getModelResponse = async (
         });
       }
 
-      // For non-anthropic providers (google, openai, etc.), use callAIProvider
+      // For non-anthropic providers (google, openai, etc.), use callAIProvider.
+      //
+      // Google is dual-path INSIDE the router, gated on isGeminiVertexMode():
+      // with the Vertex switch on it runs on @google/genai + service-account
+      // OAuth (aiModelRouter.callGoogleVertex), with the switch off (the Polis
+      // default) it stays on the API-key path. The gate deliberately lives there
+      // rather than here -- forking a second Vertex request in this file would
+      // duplicate the router's timeout, queue priority and Agora-proxy
+      // semantics. The prompt is flattened identically either way.
       const result = await callAIProvider(aiModel, provider, [
         { role: 'system', content: system_lore },
         { role: 'user', content: prompt_xml },

@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import type { GoogleGenAI } from '@google/genai';
 
 async function resolvePolisProviderCredentials(provider: string): Promise<{ apiKey: string; baseUrl?: string } | null> {
   // Environment variables are the authoritative (and only) source of API keys
@@ -84,6 +85,72 @@ export function getGeminiClient(creds?: { apiKey?: string; baseUrl?: string }): 
     geminiClient = new GoogleGenerativeAI(apiKey);
   }
   return geminiClient;
+}
+
+/**
+ * utils/aiGoogleVertex, loaded on FIRST USE rather than at module scope.
+ *
+ * That module statically imports `@google/genai` and `google-auth-library`, and
+ * that require chain (google-auth-library -> gaxios -> node-fetch -> whatwg-url
+ * -> tr46) fails outright in installs where tr46 is incomplete. A module-scope
+ * import here would therefore take down every existing consumer of this file
+ * (aiModelRouter -> routes) even with the Vertex switch OFF. Deferring the
+ * require keeps the API-key path's runtime module graph exactly as it was.
+ * The `import type` for GoogleGenAI above is erased at emit, so it adds no
+ * runtime edge either.
+ */
+type GoogleVertexModule = typeof import('./aiGoogleVertex');
+
+let googleVertexModule: GoogleVertexModule | null = null;
+
+function getGoogleVertexModule(): GoogleVertexModule {
+  if (!googleVertexModule) {
+    googleVertexModule = require('./aiGoogleVertex') as GoogleVertexModule;
+  }
+  return googleVertexModule;
+}
+
+/**
+ * Env-only half of the Vertex gate, read directly so that "switch off" neither
+ * loads utils/aiGoogleVertex nor depends on it. Accepts the same opt-in values as
+ * isGoogleVertexEnabled() (`true` / `1` / `yes`), which remains the source of
+ * truth for the switch itself.
+ */
+function isVertexSwitchOn(): boolean {
+  const value = process.env.GOOGLE_VERTEX_ENABLED?.trim().toLowerCase();
+  return value === 'true' || value === '1' || value === 'yes';
+}
+
+/**
+ * True when the google provider should run on Vertex AI instead of the API-key
+ * (AI Studio) path used above: `GOOGLE_VERTEX_ENABLED=true` AND a GCP project
+ * can be resolved.
+ *
+ * Polis defaults the switch to OFF, so the API-key client stays the default and
+ * nothing changes until an operator sets the flag.
+ */
+export function isGeminiVertexMode(): boolean {
+  if (!isVertexSwitchOn()) return false;
+  return getGoogleVertexModule().isGoogleVertexConfigured();
+}
+
+/**
+ * `@google/genai` client in Vertex mode (service-account / ADC OAuth).
+ *
+ * The legacy `@google/generative-ai` client cannot authenticate to
+ * aiplatform.googleapis.com at all, so reaching this while the switch is off is
+ * a caller bug rather than a case to fall back from -- hence the fail-fast.
+ * Delegates to the shared cached client so the Vertex option bag (and the single
+ * stub-bridging cast it needs) stays confined to utils/aiGoogleVertex.ts.
+ */
+export function getGeminiVertexClient(): GoogleGenAI {
+  if (!isVertexSwitchOn()) {
+    throw new Error(
+      'getGeminiVertexClient() called while GOOGLE_VERTEX_ENABLED is not true. Gate the call on ' +
+      'isGeminiVertexMode(), or use getGeminiClient() for the API-key path.'
+    );
+  }
+  return getGoogleVertexModule().getGoogleGenAIClient();
 }
 
 export function getDeepSeekClient(creds?: { apiKey?: string; baseUrl?: string }): OpenAI {
