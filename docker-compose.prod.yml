@@ -158,6 +158,18 @@ services:
       # (delphi/Dockerfile CMD branches on this variable: create_dynamodb_tables
       # + setup_minio before starting the poller).
       - DYNAMODB_ENDPOINT=${DYNAMODB_ENDPOINT:-http://dynamodb-local:8000}
+      # Math namespace — same string as polis-api / polis-math above (see the
+      # MATH_ENV note on polis-api). Delphi reads math_main for the PCA input
+      # and for the narrative batches, and its own defaults DISAGREE:
+      # umap_narrative/801_narrative_report_batch.py falls back to 'prod' while
+      # polismath/database/postgres.py and polismath/components/config.py read
+      # MATH_ENV and fall back to 'dev'. Without this pin the delphi half of the
+      # pipeline can look in the wrong namespace and report "No math_main data
+      # found for conversation ..." even though polis-api and polis-math agree
+      # on 'prod'. Pinned literally (not ${MATH_ENV:-prod}) so a stray value in
+      # the operator .env cannot re-split the polis-api / polis-math /
+      # polis-delphi trio.
+      - MATH_ENV=prod
     # Volumes intentionally NOT overridden:
     #   - ./delphi/umap_narrative bind mount is kept (narrative package/data)
     #   - named volumes (minio-data, dynamodb-data, polis-postgres-data) inherited from base
