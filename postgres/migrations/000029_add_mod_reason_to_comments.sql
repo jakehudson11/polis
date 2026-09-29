@@ -1,1 +1,0 @@
-ALTER TABLE comments ADD COLUMN IF NOT EXISTS mod_reason TEXT;
