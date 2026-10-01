@@ -13,13 +13,21 @@ CREATE TABLE IF NOT EXISTS polis_ai_providers (
 CREATE INDEX IF NOT EXISTS idx_polis_ai_providers_name ON polis_ai_providers(name);
 
 -- Seed providers
+-- NOTE (2026-09-26): the qwen base_url below was corrected from the China DashScope
+-- host (dashscope.aliyuncs.com) to the international host (dashscope-intl.aliyuncs.com),
+-- because international DashScope keys are rejected against the CN host. Editing
+-- this already-applied migration does NOT violate the "never edit an applied
+-- migration" convention: the statement ends in ON CONFLICT (name) DO NOTHING, so on
+-- any database where the rows already exist it is a no-op and can never rewrite a
+-- live row. Already-provisioned databases are corrected by the forward migration
+-- 20260926_fix_qwen_base_url_intl.sql instead.
 INSERT INTO polis_ai_providers (name, display_name, base_url, api_mode)
 VALUES
   ('openai',    'OpenAI',    'https://api.openai.com/v1',          'openai'),
   ('anthropic', 'Anthropic', 'https://api.anthropic.com/v1',       'anthropic'),
   ('google',    'Google',    'https://generativelanguage.googleapis.com/v1beta', 'gemini'),
   ('deepseek',  'DeepSeek',  'https://api.deepseek.com/v1',        'openai'),
-  ('qwen',      'Qwen',      'https://dashscope.aliyuncs.com/compatible-mode/v1', 'openai'),
+  ('qwen',      'Qwen',      'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', 'openai'),
   ('perplexity','Perplexity','https://api.perplexity.ai',           'openai')
 ON CONFLICT (name) DO NOTHING;
 
