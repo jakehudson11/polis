@@ -1191,7 +1191,12 @@ class JobProcessor:
         job_id = job['job_id']
         current_version = job.get('version', 1)
         new_status = 'COMPLETED' if success else 'FAILED'
-        now = datetime.now().isoformat()
+        # UTC-aware, like every other timestamp this poller writes (created_at,
+        # started_at, lock_expires_at). A naive datetime here was serialised
+        # without an offset, so consumers that parse ISO strings (the Agora Job
+        # Log) read it in their own timezone and rendered the completion BEFORE
+        # the start — with a computed duration of 0s on every Delphi row.
+        now = datetime.now(timezone.utc).isoformat()
         
         try:
             # Prepare results
