@@ -653,26 +653,34 @@ class AgoraProxyProvider(ModelProvider):
     Supports full 3-tier cascade: primary → backup → fallback.
     """
     
-    def __init__(self, model, provider, 
+    def __init__(self, model=None, provider=None,
                  backup_model=None, backup_provider=None,
                  fallback_model=None, fallback_provider=None,
                  temperature=None, max_tokens=None, json_mode=False,
                  use_case='delphi_report',
                  deliberation_id=None,
                  admin_user_id=None):
-        """Initialize the Agora proxy provider with full cascade config.
+        """Initialize the Agora proxy provider with one of two request-body modes.
+        
+        When BOTH `model` and `provider` are absent the provider runs in
+        `use_case`-only mode: the six legacy tier keys are omitted from the
+        request body entirely and Agora resolves the full tier cascade itself
+        from agora_ai_use_case_config (the table managed by the Agora superuser
+        Use Cases page). Otherwise the legacy full-tier body is sent.
         
         Args:
-            model: Primary model name
-            provider: Primary provider name (e.g., 'anthropic', 'openai')
+            model: Primary model name (None -> use_case-only mode)
+            provider: Primary provider name (None -> use_case-only mode)
             backup_model: Backup model name for fallback tier 1
             backup_provider: Backup provider name for fallback tier 1
             fallback_model: Fallback model name for fallback tier 2
             fallback_provider: Fallback provider name for fallback tier 2
+                (the four backup/fallback tiers apply only in legacy mode)
             temperature: LLM temperature
             max_tokens: Maximum output tokens
             json_mode: Whether to request JSON mode
-            use_case: Identifier for Agora's usage logging
+            use_case: Identifier for Agora's usage logging and, in
+                use_case-only mode, the tier-config lookup key
             deliberation_id: The Agora deliberation ID
             admin_user_id: The admin user ID for authorization
         """
@@ -718,15 +726,20 @@ class AgoraProxyProvider(ModelProvider):
             ),
         }
         
-        # Build payload with all tier config
+        # The six legacy tier keys are sent only when the caller supplied BOTH a
+        # primary model and a primary provider. In use_case-only mode they are
+        # omitted entirely so Agora resolves the whole cascade from
+        # agora_ai_use_case_config (managed by the Agora superuser Use Cases page).
+        legacy_tiers = bool(self.model) and bool(self.provider)
+        if legacy_tiers and self.use_case:
+            logger.warning(
+                "AgoraProxy: legacy body tiers override the Agora use_case config for this call "
+                "(use_case=%s, model=%s, provider=%s)",
+                self.use_case, self.model, self.provider,
+            )
+        
         payload = {
             "messages": messages,
-            "model": self.model,
-            "provider": self.provider,
-            "backup_model": self.backup_model,
-            "backup_provider": self.backup_provider,
-            "fallback_model": self.fallback_model,
-            "fallback_provider": self.fallback_provider,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "json_mode": self.json_mode,
@@ -734,15 +747,28 @@ class AgoraProxyProvider(ModelProvider):
             "deliberation_id": self.deliberation_id,
             "admin_user_id": self.admin_user_id,
         }
+        if legacy_tiers:
+            payload["model"] = self.model
+            payload["provider"] = self.provider
+            payload["backup_model"] = self.backup_model
+            payload["backup_provider"] = self.backup_provider
+            payload["fallback_model"] = self.fallback_model
+            payload["fallback_provider"] = self.fallback_provider
         # Remove None values so Agora uses its own defaults for unset fields
         payload = {k: v for k, v in payload.items() if v is not None}
         
-        logger.info(
-            "AgoraProxy: sending request to %s (provider=%s, model=%s, backup=%s/%s, fallback=%s/%s)",
-            url, self.provider, self.model,
-            self.backup_provider, self.backup_model,
-            self.fallback_provider, self.fallback_model,
-        )
+        if legacy_tiers:
+            logger.info(
+                "AgoraProxy: sending request to %s (mode=legacy_tiers, provider=%s, model=%s, backup=%s/%s, fallback=%s/%s)",
+                url, self.provider, self.model,
+                self.backup_provider, self.backup_model,
+                self.fallback_provider, self.fallback_model,
+            )
+        else:
+            logger.info(
+                "AgoraProxy: sending request to %s (mode=use_case, use_case=%s)",
+                url, self.use_case,
+            )
         
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=120)
@@ -763,23 +789,28 @@ class AgoraProxyProvider(ModelProvider):
                     "AgoraProxy: request failed with status %d: %s",
                     response.status_code, error_text,
                 )
-                raise RuntimeError(
-                    f"Agora proxy returned status {response.status_code}: {error_text}"
+                raise AgoraProxyStatusError(
+                    response.status_code,
+                    f"Agora proxy returned status {response.status_code}: {error_text}",
                 )
         except requests.exceptions.Timeout:
             logger.error("AgoraProxy: request timed out after 120s")
-            raise RuntimeError("Agora proxy request timed out after 120 seconds")
+            raise AgoraProxyTransportError("Agora proxy request timed out after 120 seconds")
         except requests.exceptions.ConnectionError as e:
             logger.error("AgoraProxy: connection error: %s", str(e))
-            raise RuntimeError(f"Agora proxy connection failed: {e}")
+            raise AgoraProxyTransportError(f"Agora proxy connection failed: {e}")
         except requests.exceptions.RequestException as e:
             logger.error("AgoraProxy: request error: %s", str(e))
-            raise RuntimeError(f"Agora proxy request failed: {e}")
+            raise AgoraProxyTransportError(f"Agora proxy request failed: {e}")
     
     def list_available_models(self) -> List[str]:
         """List available models (delegated to Agora)."""
-        # The proxy abstracts model selection; return the configured tiers
-        models = [f"{self.provider}/{self.model}"]
+        # The proxy abstracts model selection; return only the tiers that are
+        # actually configured. In use_case-only mode there is nothing to list:
+        # Agora resolves the tiers from agora_ai_use_case_config.
+        models: List[str] = []
+        if self.provider and self.model:
+            models.append(f"{self.provider}/{self.model}")
         if self.backup_provider and self.backup_model:
             models.append(f"{self.backup_provider}/{self.backup_model}")
         if self.fallback_provider and self.fallback_model:
@@ -1040,48 +1071,6 @@ def log_ai_usage(
             logger.warning(f"Failed to log AI usage (status {resp.status_code}): {resp.text[:200]}")
     except Exception as e:
         logger.warning(f"Failed to log AI usage (connection error): {e}")
-
-def get_model_provider_with_cascade(report_stage_config: dict) -> ModelProvider:
-    """Resolve a model provider that delegates cascade to Agora's resilience layer.
-    
-    Instead of trying each tier locally, this creates a single AgoraProxyProvider
-    with all tiers configured so that Agora's callAIProvider handles the cascade
-    with circuit breakers, fallback, and unified logging.
-    
-    Args:
-        report_stage_config: Dict with keys 'provider', 'model', 
-            'backup_provider', 'backup_model', 'fallback_provider', 'fallback_model'
-    
-    Returns:
-        An AgoraProxyProvider instance with all tiers configured
-    
-    Raises:
-        ValueError: If no primary provider/model is configured
-    """
-    primary_provider = report_stage_config.get('provider') or os.environ.get('NARRATIVE_BATCH_PROVIDER')
-    primary_model = report_stage_config.get('model') or os.environ.get('ANTHROPIC_MODEL')
-    
-    if not primary_provider or not primary_model:
-        raise ValueError(
-            "Primary provider and model must be configured. "
-            "Set 'provider'/'model' in config or NARRATIVE_BATCH_PROVIDER/ANTHROPIC_MODEL env vars."
-        )
-    
-    logger.info(
-        "Cascade: delegating to AgoraProxy (primary=%s/%s, backup=%s/%s, fallback=%s/%s)",
-        primary_provider, primary_model,
-        report_stage_config.get('backup_provider'), report_stage_config.get('backup_model'),
-        report_stage_config.get('fallback_provider'), report_stage_config.get('fallback_model'),
-    )
-    
-    return AgoraProxyProvider(
-        model=primary_model,
-        provider=primary_provider,
-        backup_model=report_stage_config.get('backup_model'),
-        backup_provider=report_stage_config.get('backup_provider'),
-        fallback_model=report_stage_config.get('fallback_model'),
-        fallback_provider=report_stage_config.get('fallback_provider'),
-    )
 
 
 def get_model_provider(provider_type: str = None, model_name: str = None) -> ModelProvider:

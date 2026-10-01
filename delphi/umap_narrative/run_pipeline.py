@@ -27,7 +27,7 @@ from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 from umap import UMAP
 
-from llm_factory_constructor.model_provider import get_model_provider, get_model_provider_with_cascade, AgoraProxyProvider
+from llm_factory_constructor.model_provider import get_model_provider, AgoraProxyProvider
 
 # Configure logging
 logging.basicConfig(
@@ -393,29 +393,18 @@ def generate_cluster_topic_labels(
             # Agora's backend handles cascade/fallback — Delphi does NOT try providers locally.
             deliberation_id = os.environ.get("DELIBERATION_ID") or os.environ.get("DELPHI_DELIBERATION_ID") or None
             
+            # use_case-only mode: Agora resolves the primary/backup/fallback tiers itself
+            # from agora_ai_use_case_config, so Delphi must NOT pick models here
+            # (llm_model may legitimately be None on this route).
             provider_instance = AgoraProxyProvider(
-                model=llm_model,
-                provider=primary_provider,
-                backup_model=os.environ.get("LLM_BACKUP_MODEL") or None,
-                backup_provider=os.environ.get("LLM_BACKUP_PROVIDER") or None,
-                fallback_model=os.environ.get("LLM_FALLBACK_MODEL") or None,
-                fallback_provider=os.environ.get("LLM_FALLBACK_PROVIDER") or None,
                 use_case='delphi_report',
                 deliberation_id=deliberation_id,
             )
             provider = provider_instance
         else:
-            config = {
-                'provider': llm_provider,
-                'model': llm_model,
-                'backup_provider': os.environ.get("LLM_BACKUP_PROVIDER") or os.environ.get("NARRATIVE_BATCH_BACKUP_PROVIDER") or None,
-                'backup_model': os.environ.get("LLM_BACKUP_MODEL") or os.environ.get("NARRATIVE_BATCH_BACKUP_MODEL") or None,
-                'fallback_provider': os.environ.get("LLM_FALLBACK_PROVIDER") or os.environ.get("NARRATIVE_BATCH_FALLBACK_PROVIDER") or None,
-                'fallback_model': os.environ.get("LLM_FALLBACK_MODEL") or os.environ.get("NARRATIVE_BATCH_FALLBACK_MODEL") or None,
-            }
-            
+            # Standalone (no Agora) path: call the resolved vendor directly.
             try:
-                provider = get_model_provider_with_cascade(config)
+                provider = get_model_provider(provider_type=llm_provider, model_name=llm_model)
             except ValueError as e:
                 logger.warning(f"Topic naming skipped (non-blocking): {e}. Using conventional topic naming.")
                 llm_stats["skipped"] += 1

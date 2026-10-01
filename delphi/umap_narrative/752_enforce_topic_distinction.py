@@ -30,7 +30,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from umap_narrative.llm_factory_constructor import get_model_provider, get_model_provider_with_cascade, AgoraProxyProvider
+from umap_narrative.llm_factory_constructor import get_model_provider, AgoraProxyProvider
 from umap_narrative.llm_factory_constructor.model_provider import log_ai_usage
 
 logger = logging.getLogger(__name__)
@@ -271,12 +271,16 @@ def _parse_llm_response(response_text: str) -> Optional[Dict[str, Any]]:
 def resolve_model_and_provider(
     model_name: Optional[str] = None,
     provider_type: Optional[str] = None,
-) -> Tuple[str, str, bool]:
+) -> Tuple[Optional[str], str, bool]:
     """Resolve the matched (model, provider) pair for this invocation.
 
     Precedence (an explicit CLI --model argument always wins):
       Agora route:  --model  >  LLM_MODEL (job-scoped)  >  ANTHROPIC_MODEL
       direct SDK:   --model  >  ANTHROPIC_MODEL                        (unchanged)
+
+    On the Agora route the returned model may be None: AgoraProxyProvider is
+    constructed in use_case-only mode and Agora resolves the model itself from
+    its agora_ai_use_case_config table.
 
     The Agora route's provider is job-scoped (LLM_PRIMARY_PROVIDER ->
     LLM_PROVIDER_ACTUAL), so its model must prefer the job-scoped LLM_MODEL
@@ -304,13 +308,15 @@ def resolve_model_and_provider(
         job_model = os.environ.get("LLM_MODEL")
         resolved_model = model_name or job_model or os.environ.get("ANTHROPIC_MODEL")
         if not resolved_model:
-            raise ValueError(
-                "No model could be resolved for the Agora route: pass --model or set the "
-                "job-scoped LLM_MODEL. Attempted in order: --model argument, LLM_MODEL, "
-                "ANTHROPIC_MODEL (all unset). The model must be chosen together with the "
-                "job-scoped provider chain LLM_PRIMARY_PROVIDER/LLM_PROVIDER_ACTUAL."
+            # use_case-only mode: AgoraProxyProvider is constructed without a model,
+            # so no job-scoped model being resolvable is no longer fatal here.
+            logger.warning(
+                "Agora route: no job-scoped model was resolvable (attempted in order: "
+                "--model argument, LLM_MODEL, ANTHROPIC_MODEL, all unset). Agora will "
+                "resolve the model from its use_case config for use_case "
+                "'delphi_report'; sending no model in the request."
             )
-        if not model_name and not job_model:
+        if not model_name and not job_model and resolved_model:
             logger.warning(
                 "Agora route has no job-scoped LLM_MODEL; falling back to the "
                 "container-global ANTHROPIC_MODEL=%r while job-scoped provider=%r — "
@@ -378,22 +384,15 @@ def enforce_topic_distinction(
         # Agora's backend handles cascade/fallback — Delphi does NOT try providers locally.
         deliberation_id = os.environ.get("DELIBERATION_ID") or os.environ.get("DELPHI_DELIBERATION_ID") or None
         
+        # use_case-only mode: Agora resolves the primary/backup/fallback tiers itself
+        # from agora_ai_use_case_config, so Delphi must NOT pick models here.
         provider = AgoraProxyProvider(
-            model=model_name,
-            provider=provider_name,
-            backup_model=os.environ.get("LLM_BACKUP_MODEL") or None,
-            backup_provider=os.environ.get("LLM_BACKUP_PROVIDER") or None,
-            fallback_model=os.environ.get("LLM_FALLBACK_MODEL") or None,
-            fallback_provider=os.environ.get("LLM_FALLBACK_PROVIDER") or None,
             use_case='delphi_report',
             deliberation_id=deliberation_id,
         )
     else:
-        config = {
-            'provider': provider_name,
-            'model': model_name,
-        }
-        provider = get_model_provider_with_cascade(config)
+        # Standalone (no Agora) path: call the resolved vendor directly.
+        provider = get_model_provider(provider_type=provider_name, model_name=model_name)
 
     st_model_name = os.environ.get("SENTENCE_TRANSFORMER_MODEL", "all-MiniLM-L6-v2")
     logger.info("Loading SentenceTransformer model: %s", st_model_name)
@@ -484,7 +483,7 @@ def enforce_topic_distinction(
                 deliberation_id = os.environ.get('DELPHI_DELIBERATION_ID', '')
                 log_ai_usage(
                     use_case='delphi_report',
-                    model=model_name,
+                    model=model_name or 'unknown',
                     provider='anthropic',
                     input_tokens=estimated_input,
                     output_tokens=estimated_output,

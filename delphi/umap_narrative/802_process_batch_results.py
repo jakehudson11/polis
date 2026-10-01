@@ -431,17 +431,13 @@ class BatchResultProcessor:
         )
 
         if agora_available:
+            # use_case-only mode: Agora resolves the primary/backup/fallback tier
+            # cascade itself from its superuser-managed use-case config.
             model_provider = AgoraProxyProvider(
-                model=model_name,
-                provider=batch_provider,
-                backup_model=os.environ.get('NARRATIVE_BATCH_BACKUP_MODEL'),
-                backup_provider=os.environ.get('NARRATIVE_BATCH_BACKUP_PROVIDER'),
-                fallback_model=os.environ.get('NARRATIVE_BATCH_FALLBACK_MODEL'),
-                fallback_provider=os.environ.get('NARRATIVE_BATCH_FALLBACK_PROVIDER'),
                 use_case='delphi_report',
                 deliberation_id=os.environ.get('DELIBERATION_ID'),
             )
-            logger.info(f"Using AgoraProxyProvider for sequential fallback: {batch_provider}/{model_name}")
+            logger.info(f"Using AgoraProxyProvider for sequential fallback (use_case-only): {batch_provider}/{model_name}")
         else:
             model_provider = get_model_provider(batch_provider, model_name)
 

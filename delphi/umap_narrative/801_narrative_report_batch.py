@@ -1761,69 +1761,6 @@ class BatchReportGenerator:
         logger.info(f"Prepared {len(batch_requests)} batch requests")
         return batch_requests
     
-    async def process_request(self, request):
-        """Process a single topic report request."""
-        try:
-            # Extract metadata
-            metadata = request.get('metadata', {})
-            topic_name = metadata.get('topic_name', 'Unknown Topic')
-            section_name = metadata.get('section_name', f"topic_{topic_name.lower().replace(' ', '_')}")
-
-            logger.info(f"Processing request for topic: {topic_name}")
-
-            # Create provider via cascade
-            from umap_narrative.llm_factory_constructor import get_model_provider_with_cascade
-            config = {
-                'provider': self.provider,
-                'model': self.model,
-                'backup_provider': self.backup_provider,
-                'backup_model': self.backup_model,
-                'fallback_provider': self.fallback_provider,
-                'fallback_model': self.fallback_model,
-            }
-            anthropic_provider = get_model_provider_with_cascade(config)
-
-            # Get response from LLM
-            response = await anthropic_provider.get_completion(
-                system=request.get('system', ''),
-                prompt=request.get('messages', [])[0].get('content', ''),
-                max_tokens=request.get('max_tokens', 4000)
-            )
-
-            # Log response for debugging
-            logger.info(f"Received response from LLM for topic {topic_name}")
-
-            # Extract content from the response
-            content = response.get('content', '{}')
-
-            # Store the result in NarrativeReports table
-            if self.report_id:
-                self.report_storage.store_report(
-                    report_id=self.report_id,
-                    section=section_name,
-                    model=self.model,
-                    report_data=content,
-                    job_id=self.job_id,
-                    metadata={
-                        'topic_name': topic_name,
-                        'cluster_id': metadata.get('cluster_id')
-                    }
-                )
-                logger.info(f"Stored report for section {section_name}")
-            else:
-                logger.warning(f"No report_id available, skipping storage for {section_name}")
-
-            return {
-                'topic_name': topic_name,
-                'section_name': section_name,
-                'response': response
-            }
-        except Exception as e:
-            logger.error(f"Error processing request for topic {request.get('metadata', {}).get('topic_name', 'unknown')}: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None
-
     async def _submit_sequential(self, provider_type: str, model_name: str, batch_requests: list) -> bool:
         """
         Process batch requests sequentially for providers without a Batch API.
@@ -1844,17 +1781,13 @@ class BatchReportGenerator:
 
         try:
             if agora_available:
+                # use_case-only mode: Agora resolves the primary/backup/fallback
+                # tier cascade itself from its superuser-managed use-case config.
                 provider = AgoraProxyProvider(
-                    model=model_name,
-                    provider=provider_type,
-                    backup_model=os.environ.get('NARRATIVE_BATCH_BACKUP_MODEL'),
-                    backup_provider=os.environ.get('NARRATIVE_BATCH_BACKUP_PROVIDER'),
-                    fallback_model=os.environ.get('NARRATIVE_BATCH_FALLBACK_MODEL'),
-                    fallback_provider=os.environ.get('NARRATIVE_BATCH_FALLBACK_PROVIDER'),
                     use_case='delphi_report',
                     deliberation_id=os.environ.get('DELIBERATION_ID'),
                 )
-                logger.info(f"Using AgoraProxyProvider for sequential fallback: {provider_type}/{model_name}")
+                logger.info(f"Using AgoraProxyProvider for sequential fallback (use_case-only): {provider_type}/{model_name}")
             else:
                 from umap_narrative.llm_factory_constructor.model_provider import get_model_provider
                 provider = get_model_provider(provider_type=provider_type, model_name=model_name)
@@ -1941,7 +1874,7 @@ class BatchReportGenerator:
                 return proxy_result
             if proxy_result is None:
                 logger.error(
-                    f"Agora proxy rejected the batch (config/budget error 400/401/402); "
+                    f"Agora proxy rejected the batch (config/budget error 400/401/402/403); "
                     f"not falling back to direct {provider} SDK"
                 )
                 return None
@@ -2156,8 +2089,11 @@ class BatchReportGenerator:
         Returns:
             batch_id (str): The Agora batch_id on success.
             None: The proxy rejected the batch with a config/budget error
-                (HTTP 400/401/402) — callers must NOT fall back to the
-                direct SDK (the error is real).
+                (HTTP 400/401/402/403) — callers must NOT fall back to the
+                direct SDK (the error is real). 403 is included because the
+                Agora batch route returns 403 for a missing/invalid signed
+                x-agora-budget-context header (audit F-801) — a caller-side
+                configuration fault, not a transient failure.
             False: Infrastructure failure (proxy unreachable, timeout, 5xx,
                 502 batch_submission_failed, malformed response) — callers
                 may fall back to the direct SDK path.
@@ -2249,8 +2185,12 @@ class BatchReportGenerator:
             logger.error(f"Agora batch submission returned not-complete (treating as submission failure): {e}")
             return False
         except AgoraProxyStatusError as e:
-            if e.status_code in (400, 401, 402):
+            if e.status_code in (400, 401, 402, 403):
                 # Config/budget errors are real — never fall back to the direct SDK.
+                # 403 belongs here: the Agora batch route answers
+                # 'missing_or_invalid_budget_context' with 403, so treating it as
+                # transient sent the job down the direct-SDK path, where it died
+                # with a misleading 'API key not set' error that hid the real cause.
                 logger.error(
                     f"Agora batch submission rejected with status {e.status_code} ({e}); "
                     "not falling back to direct SDK"
@@ -2368,6 +2308,28 @@ class BatchReportGenerator:
         # direct SDK and only fall back for infrastructure failures. Agora
         # resolves the provider/model cascade itself (use_case='delphi_report').
 
+        # Connected mode: Agora owns the tier cascade. The proxy resolves
+        # primary/backup/fallback itself from the superuser-managed use-case
+        # config, so repeating the per-tier submissions below would issue
+        # identical calls. Make ONE submission attempt and return.
+        if agora_batch_configured():
+            logger.info("Agora batch proxy configured; submitting once and letting Agora resolve the tier cascade")
+            agora_result = await self._try_agora_proxy_submit(batch_requests)
+            if agora_result:
+                logger.info(f"Agora batch proxy submission succeeded: batch_id={agora_result}")
+                return agora_result
+            if agora_result is None:
+                logger.error(
+                    "Agora batch proxy rejected the batch (config/budget error 400/401/402/403); "
+                    "there is no fallback because Agora owns the tier cascade"
+                )
+                return None
+            logger.error(
+                "Agora batch proxy failed at the infrastructure level; per-tier retries are "
+                "skipped because Agora owns the tier cascade"
+            )
+            return None
+
         # Build provider cascade: primary → backup → fallback
         tiers = []
         if self.provider and self.model:
@@ -2432,7 +2394,7 @@ class BatchReportGenerator:
                 return proxy_result
             if proxy_result is None:
                 logger.error(
-                    "Agora proxy rejected the batch (config/budget error 400/401/402); "
+                    "Agora proxy rejected the batch (config/budget error 400/401/402/403); "
                     "not falling back to direct Anthropic SDK"
                 )
                 return None
