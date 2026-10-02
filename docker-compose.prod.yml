@@ -170,6 +170,30 @@ services:
       # the operator .env cannot re-split the polis-api / polis-math /
       # polis-delphi trio.
       - MATH_ENV=prod
+      # Poller tuning — consumed as ARGV by the `command:` override below. The
+      # env vars alone are INERT: the image's baked CMD passes only --interval,
+      # and job_poller.py reads --max-workers / --interval from argv, not the
+      # environment (start_poller.py, which does read the env form, is never
+      # run by this image). Without the override prod polls with the image's
+      # baked max-workers while staging runs 3 — a silent rate divergence.
+      - POLL_INTERVAL=${POLL_INTERVAL:-2}
+      - MAX_WORKERS=${MAX_WORKERS:-3}
+      # INSTANCE_SIZE IS read from the environment. The base file defaults it
+      # to `default`, which processes ONLY normal-size conversations: a
+      # conversation is "large" above 5000 comments, `large` instances process
+      # ONLY large jobs, `small`/`default` ONLY normal ones, and `dev` is the
+      # only value that processes ANY size. At `default`, prod would silently
+      # never process a >5000-comment conversation while staging
+      # (INSTANCE_SIZE=dev) would. The base file's DELPHI_CONTAINER_MEMORY
+      # (16g) limit is sized for the large-job case.
+      - INSTANCE_SIZE=${INSTANCE_SIZE:-dev}
+    # Same boot steps as the image's CMD (Dockerfile branches on
+    # DYNAMODB_ENDPOINT): create the DynamoDB tables + MinIO bucket, then start
+    # the poller with explicit worker/interval values. Mirrors the override in
+    # agora's docker-compose.staging.yml so both environments poll identically.
+    # `$$AWS_REGION` is a compose escape for a literal `$AWS_REGION`, which bash
+    # then expands from the container env — do NOT collapse it to a single `$`.
+    command: ["bash", "-c", "python create_dynamodb_tables.py --region $$AWS_REGION && python setup_minio.py && python scripts/job_poller.py --interval=${POLL_INTERVAL:-2} --max-workers=${MAX_WORKERS:-3}"]
     # Volumes intentionally NOT overridden:
     #   - ./delphi/umap_narrative bind mount is kept (narrative package/data)
     #   - named volumes (minio-data, dynamodb-data, polis-postgres-data) inherited from base
