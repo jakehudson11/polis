@@ -6,6 +6,7 @@ import {
   buildAndUpdateContext,
 } from "../utils/contextBuilder";
 import { generateSeedComments } from "../utils/seedCommentGenerator";
+import { SEED_COMMENT_CAP } from "../utils/seedCommentPrompt";
 import logger from "../utils/logger";
 import pg from "../db/pg-query";
 import { addParticipant } from "../participant";
@@ -21,6 +22,18 @@ interface GenerateSeedCommentsRequest extends Request {
     conversation_id: string;
   };
 }
+
+interface PreparedSeedComment {
+  txt: string;
+  lang: any;
+  lang_confidence: any;
+}
+
+// Shared by the hard-cap pre-check and the transactional insert in
+// handle_POST_generate_seed_comments below. Only ACTIVE seed comments count,
+// so deactivated (soft-deleted) seed comments free allowance.
+const COUNT_ACTIVE_SEED_COMMENTS_SQL = `SELECT COUNT(*)::int AS count FROM comments WHERE zid = $1 AND is_seed = true AND active = true;`;
+const SEED_COMMENT_LIMIT_REASON = "seed_comment_limit_reached";
 
 /**
  * POST /api/v3/conversations/:conversation_id/generate-seed-comments
@@ -79,6 +92,40 @@ export async function handle_POST_generate_seed_comments(
       return;
     }
 
+    // 3b. Hard cap on the total number of active seed comments per
+    // conversation: skip generation entirely when the cap is already reached.
+    // Deactivated (soft-deleted) seed comments do not count, so they free
+    // allowance. The Agora caller only checks for success/throw, so a 200 with
+    // skipped:true is fine.
+    const activeSeedRows: any[] = await pg.queryP(
+      COUNT_ACTIVE_SEED_COMMENTS_SQL,
+      [zid]
+    ) as any[];
+    const existingSeedCount: number = activeSeedRows[0]?.count ?? 0;
+
+    if (existingSeedCount >= SEED_COMMENT_CAP) {
+      logger.info(
+        "Skipping seed comment generation: active seed comment cap reached",
+        {
+          zid,
+          existingCount: existingSeedCount,
+          cap: SEED_COMMENT_CAP,
+        }
+      );
+      res.json({
+        success: true,
+        skipped: true,
+        reason: SEED_COMMENT_LIMIT_REASON,
+        cap: SEED_COMMENT_CAP,
+        existingCount: existingSeedCount,
+        count: 0,
+        totalGenerated: 0,
+        comments: [],
+        results: [],
+      });
+      return;
+    }
+
     // 4. Generate seed comments using OpenAI
     logger.info("Generating seed comments via OpenAI", {
       zid,
@@ -117,7 +164,11 @@ export async function handle_POST_generate_seed_comments(
     const results: any[] = [];
     let lastInteractionTime = new Date(0);
 
-    // Insert each comment
+    // Prepare candidates outside the transaction: apply the existing
+    // pre-filters (empty text, duplicate check, language detection) now and
+    // defer all inserts, so the transaction below is not held open during
+    // language detection.
+    const candidates: PreparedSeedComment[] = [];
     for (const txt of seedComments) {
       try {
         if (!txt || txt.trim() === "") {
@@ -146,35 +197,94 @@ export async function handle_POST_generate_seed_comments(
         // Detect language
         const detections = await detectLanguage(txt);
         const detection = Array.isArray(detections) ? detections[0] : detections;
-        const lang = detection.language;
-        const lang_confidence = detection.confidence;
+
+        candidates.push({
+          txt,
+          lang: detection.language,
+          lang_confidence: detection.confidence,
+        });
+      } catch (err: any) {
+        logger.error("Failed to prepare seed comment", { error: err, txt });
+        results.push({
+          txt,
+          status: "error",
+          reason: err.message || "unknown_error",
+        });
+      }
+    }
+
+    // Insert the prepared candidates inside a transaction, bounded by the
+    // remaining allowance of active seed comments. The transaction-scoped
+    // advisory lock serialises concurrent generate runs for the same
+    // conversation so the count re-check and the inserts see a consistent
+    // state.
+    await pg.withTransaction(async (client) => {
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+        "polis_seed_comments:" + zid,
+      ]);
+
+      const countResult: any = await client.query(
+        COUNT_ACTIVE_SEED_COMMENTS_SQL,
+        [zid]
+      );
+      const activeSeedCount: number = countResult.rows[0]?.count ?? 0;
+      let allowance = Math.max(0, SEED_COMMENT_CAP - activeSeedCount);
+
+      for (const candidate of candidates) {
+        if (allowance <= 0) {
+          results.push({
+            txt: candidate.txt,
+            status: "skipped",
+            reason: SEED_COMMENT_LIMIT_REASON,
+          });
+          continue;
+        }
+
+        // Re-run the duplicate check inside the transaction to close the race
+        // window against a concurrent generate run
+        const existingComments: any[] = (
+          await client.query(
+            `SELECT tid FROM comments WHERE zid = $1 AND txt = $2 LIMIT 1;`,
+            [zid, candidate.txt]
+          )
+        ).rows;
+        if (existingComments && existingComments.length > 0) {
+          results.push({
+            txt: candidate.txt,
+            status: "skipped",
+            reason: "duplicate",
+          });
+          continue;
+        }
 
         // Seed comments are always auto-approved
         const active = true;
         const mod = polisTypes.mod.ok;
 
         // Insert comment
-        const insertedComment: any = await pg.queryP(
-          `INSERT INTO COMMENTS
+        const insertedRows: any[] = (
+          await client.query(
+            `INSERT INTO COMMENTS
           (pid, zid, txt, velocity, active, mod, uid, anon, is_seed, created, tid, lang, lang_confidence)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, default, null, $10, $11)
           RETURNING *;`,
-          [
-            pid,
-            zid,
-            txt,
-            1, // velocity
-            active,
-            mod,
-            uid,
-            false, // anon
-            true, // is_seed
-            lang,
-            lang_confidence,
-          ]
-        );
+            [
+              pid,
+              zid,
+              candidate.txt,
+              1, // velocity
+              active,
+              mod,
+              uid,
+              false, // anon
+              true, // is_seed
+              candidate.lang,
+              candidate.lang_confidence,
+            ]
+          )
+        ).rows;
 
-        const comment = insertedComment[0];
+        const comment = insertedRows[0];
         const tid = comment.tid;
         const createdTimeMillis = safeTimestampToMillis(comment.created);
         const createdTime = new Date(createdTimeMillis);
@@ -183,16 +293,10 @@ export async function handle_POST_generate_seed_comments(
           lastInteractionTime = createdTime;
         }
 
-        results.push({ txt, status: "success", tid });
-      } catch (err: any) {
-        logger.error("Failed to insert seed comment", { error: err, txt });
-        results.push({
-          txt,
-          status: "error",
-          reason: err.message || "unknown_error",
-        });
+        results.push({ txt: candidate.txt, status: "success", tid });
+        allowance -= 1;
       }
-    }
+    });
 
     // Update conversation modified time
     if (lastInteractionTime > new Date(0)) {

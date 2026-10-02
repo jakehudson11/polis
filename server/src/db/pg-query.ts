@@ -1,5 +1,5 @@
 import { isFunction, isString, isUndefined } from "underscore";
-import { Pool, PoolConfig, QueryResult } from "pg";
+import { Pool, PoolClient, PoolConfig, QueryResult } from "pg";
 import { parse as parsePgConnectionString } from "pg-connection-string";
 import QueryStream from "pg-query-stream";
 
@@ -201,6 +201,31 @@ function queryP_metered_readOnly(
   return queryP_metered_impl(true, name, queryString, params);
 }
 
+// Runs `fn` inside a single transaction on a client checked out from the
+// read/write pool. Commits on success; on error the transaction is rolled back
+// (rollback failures are swallowed so they cannot mask the original error) and
+// the original error is rethrown. The client is always released.
+async function withTransaction<T>(
+  fn: (client: PoolClient) => Promise<T>
+): Promise<T> {
+  const client: PoolClient = await readWritePool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackErr) {
+      logger.error("pg_transaction_rollback_fail", rollbackErr);
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 function stream_queryP_readOnly(
   queryString: string,
   params: any[],
@@ -242,5 +267,6 @@ export default {
   queryP_metered_readOnly,
   queryP_readOnly,
   queryP_readOnly_wRetryIfEmpty,
+  withTransaction,
   stream_queryP_readOnly,
 };
