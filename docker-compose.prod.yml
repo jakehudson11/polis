@@ -210,6 +210,17 @@ services:
     # label (MATH_ENV options: prod, preprod, dev).
     environment:
       - MATH_ENV=prod
+    # Memory/CPU ceiling. The base file gives polis-math NO limits at all, so a
+    # runaway math worker could consume the whole VM and take the shared
+    # Caddy/LiveKit edge (and staging) down with it. Staging pins the same
+    # service at 1G / 0.5 CPU (agora's docker-compose.staging.yml); prod
+    # mirrors that ceiling. Both values are env-overridable so they can be
+    # raised without editing this file.
+    deploy:
+      resources:
+        limits:
+          memory: ${MATH_CONTAINER_MEMORY:-1g}
+          cpus: ${MATH_CONTAINER_CPUS:-0.5}
     # Base attaches polis-math to polis-net only; prod replaces that with the
     # external agora network (shared with the agora backend stack).
     networks: !override
