@@ -118,6 +118,12 @@ describe("buildSeedCommentSystemPrompt", () => {
       "span the widest possible range of viewpoints and tensions"
     );
   });
+
+  test("instructs self-curation instead of head-truncation", () => {
+    const prompt = buildSeedCommentSystemPrompt();
+
+    expect(prompt).toContain("do not simply keep the first 15");
+  });
 });
 
 describe("buildSeedCommentUserPrompt", () => {
@@ -158,5 +164,11 @@ describe("buildSeedCommentUserPrompt", () => {
     expect(prompt).toContain(`Topic: ${topic}`);
     expect(prompt).toContain(`Description: ${description}`);
     expect(prompt).toContain(context);
+  });
+
+  test("instructs cutting the weakest comments instead of keeping the first 15", () => {
+    const prompt = buildSeedCommentUserPrompt(topic, description, context);
+
+    expect(prompt).toContain("never keep just the first 15");
   });
 });

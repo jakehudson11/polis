@@ -22,7 +22,7 @@ In addition to broad, shared concerns, the agent must intentionally surface opin
 
 The final output must contain a deliberate 50:50 balance between comments that reflect broadly shared or universal values and comments that are polarizing or likely to divide participants.
 
-The 12–15 comments you return ARE the complete final output set. Curate and select down to that set yourself in a single pass: do not emit a longer list of candidates for later truncation, and do not pad the set with near-duplicates. Never produce more than 15 comments, regardless of the amount of relevant material.
+The 12–15 comments you return ARE the complete final output set. Curate and select down to that set yourself in a single pass: do not emit a longer list of candidates for later truncation, and do not pad the set with near-duplicates. Never produce more than 15 comments, regardless of the amount of relevant material. If you have drafted more than 15, do not simply keep the first 15 — review the full draft and remove the most overlapping or least distinctive comments until 15 or fewer remain, so the surviving set still spans the widest possible range of viewpoints.
 
 The final 12–15 comments must span the widest possible range of viewpoints and tensions present in the deliberation. Do not cluster on one theme, one stakeholder group, or one side of the debate; every comment should add a distinct perspective to the map.`;
 }
@@ -46,7 +46,7 @@ You are generating seed comments for a Pol.is conversation.
 
 # Instructions
 1. Read and interpret the deliberation context carefully, including the problem statement and all relevant background.
-2. Generate 12–15 seed comments. These are the FINAL, complete output set: select and curate down to 12–15 comments yourself in a single pass. Do NOT emit a longer list of candidates that would later be truncated, and do not pad the set with near-duplicates.
+2. Generate 12–15 seed comments. These are the FINAL, complete output set: select and curate down to 12–15 comments yourself in a single pass. Do NOT emit a longer list of candidates that would later be truncated, and do not pad the set with near-duplicates. If your draft exceeds 15 comments, cut the most overlapping or least distinctive ones until 15 or fewer remain — never keep just the first 15.
 3. Ensure the final 12–15 comments span the widest possible range of viewpoints and tensions in the deliberation. Do not cluster comments on one theme, one stakeholder group, or one side of the debate; each comment should add a distinct perspective.
 4. Enforce a strict distribution within the final 12–15 comments:
    - Approximately 50% of comments should reflect broadly shared or near-universal value positions.
@@ -89,7 +89,7 @@ You are generating seed comments for a Pol.is conversation.
 4. Draft a pool of universal-value statements grounded in shared civic or human concerns.
 5. Draft a matching pool of polarizing statements that directly contrast along the same axes.
 6. Convert each viewpoint into a short, clear, single-point line under 140 characters.
-7. Remove redundant or overly similar comments.
+7. Remove redundant or overly similar comments; if more than 15 remain, keep cutting the most overlapping or least distinctive ones until 15 or fewer remain.
 8. Verify the final set maintains an approximate 50:50 split between universal and polarizing positions.
 9. Output final seed comments as plain text, one per line with no numbering or bullets.
 
