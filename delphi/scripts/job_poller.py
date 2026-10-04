@@ -557,11 +557,17 @@ class JobProcessor:
         try:
             if is_still_processing:
                 # Set status to AWAITING_RECHECK so find_pending_job can pick it up again.
+                # retry_count must be seeded with if_not_exists: DynamoDB rejects the whole
+                # update ("attribute does not exist") for jobs created without it, which is
+                # exactly the AWAITING_NARRATIVE_BATCH check job (801/803 never set it). The
+                # failed release left the job PROCESSING until its 15-minute lock expired,
+                # so every Agora batch that was still running at its first check stalled for
+                # the rest of the lock window before the zombie re-queue picked it up.
                 self.table.update_item(
                     Key={'job_id': job_id},
-                    UpdateExpression="SET #s = :recheck_status, retry_count = retry_count + :inc REMOVE lock_expires_at",
+                    UpdateExpression="SET #s = :recheck_status, retry_count = if_not_exists(retry_count, :zero) + :inc REMOVE lock_expires_at",
                     ExpressionAttributeNames={'#s': 'status'},
-                    ExpressionAttributeValues={':recheck_status': 'AWAITING_RECHECK', ':inc': 1}
+                    ExpressionAttributeValues={':recheck_status': 'AWAITING_RECHECK', ':inc': 1, ':zero': 0}
                 )
             else:
                 # For jobs that are finished (completed/failed), just remove the lock.
