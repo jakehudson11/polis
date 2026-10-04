@@ -815,6 +815,11 @@ class JobProcessor:
             'parent_job_id': parent_job_id,
         }
 
+        # DynamoDB rejects None; only copy the parent's deliberation_id when present so
+        # downstream Agora budget-context headers carry the real deliberation (not the zid).
+        if parent_job.get('deliberation_id'):
+            item['deliberation_id'] = str(parent_job['deliberation_id'])
+
         try:
             self.table.put_item(Item=item)
             self.update_job_logs(parent_job, {
