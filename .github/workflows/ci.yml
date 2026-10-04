@@ -1,17 +1,19 @@
 # =============================================================================
-# Polis CI — multi-arch image build/push to GHCR
+# Polis CI — single-arch (linux/amd64) image build/push to GHCR
 #
-# Trigger: push to main. Builds and pushes linux/amd64 + linux/arm64 images:
+# Trigger: push to main. Builds and pushes linux/amd64 images:
 #   ghcr.io/jakehudson11/polis-server    (./server, node:24-alpine)
 #   ghcr.io/jakehudson11/polis-math      (./math, clojure:temurin-17)
 #   ghcr.io/jakehudson11/polis-delphi    (./delphi, python 3.12 + torch CPU)
 #
-# The prod VM (ARM, Ubuntu 24.04) pulls these pinned with POLIS_IMAGE_TAG
-# (see docker-compose.prod.yml image: entries); amd64 keeps x64 boxes usable
-# and gives a rollback path.
+# The deployment VM is x86_64 (Ubuntu, Hetzner) and every container it runs is
+# amd64/linux, so images are built for linux/amd64 only. README-prod.md offers an
+# ARM (CAX41) VM as one option, but the host actually in use is x86_64; if it is
+# ever moved to arm64, re-add linux/arm64 to the platforms: of all three build
+# steps here AND in the agora repo's ci.yml.
 #
-# NOTE: polis-delphi compiles hdbscan from source — the arm64 build takes
-# 10+ minutes, that is expected. Build args mirror the prod compose
+# NOTE: polis-delphi still compiles hdbscan from source for amd64, so it remains
+# the slowest of the three even without the arm64 leg. Build args mirror the prod compose
 # (target: final, USE_CPU_TORCH=true) so CI images match `docker compose
 # build` output.
 # =============================================================================
@@ -57,7 +59,15 @@ jobs:
           context: ./server
           file: ./server/Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
+          # The deploy VM is x86_64 (measured 2026-10-04: uname -m = x86_64, docker
+          # server arch x86_64, and every running polis container reports
+          # amd64/linux). The arm64 leg was consumed by nothing and was built under
+          # QEMU emulation — notably polis-delphi, which compiles hdbscan from
+          # source. If the deployment host is ever moved to arm64, add linux/arm64
+          # back here and in agora's ci.yml together.
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ghcr.io/jakehudson11/polis-server:${{ steps.sha.outputs.short }}
             ghcr.io/jakehudson11/polis-server:latest
@@ -68,12 +78,21 @@ jobs:
           context: ./math
           file: ./math/Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
+          # The deploy VM is x86_64 (measured 2026-10-04: uname -m = x86_64, docker
+          # server arch x86_64, and every running polis container reports
+          # amd64/linux). The arm64 leg was consumed by nothing and was built under
+          # QEMU emulation — notably polis-delphi, which compiles hdbscan from
+          # source. If the deployment host is ever moved to arm64, add linux/arm64
+          # back here and in agora's ci.yml together.
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ghcr.io/jakehudson11/polis-math:${{ steps.sha.outputs.short }}
             ghcr.io/jakehudson11/polis-math:latest
 
-      # Slow on arm64 (hdbscan compiles from source) — expected, keep it.
+      # Slowest of the three (hdbscan compiles from source) — expected. The GHA
+      # cache in this step is what keeps repeat builds of this layer cheap.
       - name: Build & push polis-delphi
         uses: docker/build-push-action@v6
         with:
@@ -83,7 +102,15 @@ jobs:
           build-args: |
             USE_CPU_TORCH=true
           push: true
-          platforms: linux/amd64,linux/arm64
+          # The deploy VM is x86_64 (measured 2026-10-04: uname -m = x86_64, docker
+          # server arch x86_64, and every running polis container reports
+          # amd64/linux). The arm64 leg was consumed by nothing and was built under
+          # QEMU emulation — notably polis-delphi, which compiles hdbscan from
+          # source. If the deployment host is ever moved to arm64, add linux/arm64
+          # back here and in agora's ci.yml together.
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ghcr.io/jakehudson11/polis-delphi:${{ steps.sha.outputs.short }}
             ghcr.io/jakehudson11/polis-delphi:latest
