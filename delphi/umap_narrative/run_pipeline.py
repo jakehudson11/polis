@@ -475,7 +475,9 @@ def generate_cluster_topic_labels(
 
                     topic = topic.replace("*", "")
                     if len(topic) > 50:
-                        topic = topic[:50] + "..."
+                        # Cut at a word boundary so the UI never shows a half-word like "displace..."
+                        truncated = topic[:50].rsplit(" ", 1)[0].rstrip(" ,;:-")
+                        topic = (truncated or topic[:50]).rstrip() + "..."
                     return topic.strip()
 
                 def get_topic_name(comments, fallback_characteristics, cluster_id: int) -> str:

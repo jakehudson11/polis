@@ -16,25 +16,21 @@
             the response with ```, your response MUST begin with { and end with }
         </instruction>
         <instruction>
-            SUBSET AWARENESS: You are analyzing a SUBSET of the conversation — only comments with high uncertainty/pass rates. The full conversation contains more comments than shown here. Check the conversation_context field in the data section for exact counts. Do NOT claim patterns like "all comments showed X" or "100% of comments" — you are only seeing filtered comments that exceeded the uncertainty threshold.
+            WRITE ABOUT THE FINDINGS, NOT THE METHOD: start directly with what participants were uncertain about and why. Never mention filtering, subsets, thresholds, pass-rate mechanics, comment counts, sample sizes, or the analysis process. Never open with "Analysis of..." or refer to "filtered comments". Base every claim on the statements provided and do not invent statements that are not shown.
         </instruction>
         <instruction>
-            TRIBE TERMINOLOGY: Participant groups are called "Tribes". Always write "Tribe 1", "Tribe 2", etc. (1-indexed). Never write "Group 0", "Group 1". The XML data uses zero-indexed element names (tribe-0, tribe-1, etc.) — add 1 when writing tribe names: tribe-0 = Tribe 1, tribe-1 = Tribe 2, and so on.
+            TRIBE TERMINOLOGY: Participant groups are called "Tribes". Each `&lt;tribe-N&gt;` element carries a `label` attribute ("Tribe 1", "Tribe 2"). Use that label. If you refer to element names, remember tribe-0 = Tribe 1, tribe-1 = Tribe 2, and so on. Never write "Group 0", "Group 1".
         </instruction>
     </criticalInstructions>
 
     <definitions>
         <term name="uncertainty">
-            <description>Comments with high pass rates (participants choose "pass" instead of
-                agree/disagree)</description>
-            <threshold>20</threshold>
-            <unit>percent</unit>
+            <description>Comments where a notable share of participants chose "pass" instead of
+                agree/disagree</description>
         </term>
         <term name="high_uncertainty">
-            <description>Comments with very high pass rates, suggesting significant voter
-                hesitation or confusion</description>
-            <threshold>35</threshold>
-            <unit>percent</unit>
+            <description>Comments where a large share of participants passed, suggesting significant
+                voter hesitation or confusion</description>
         </term>
     </definitions>
 
@@ -76,8 +72,8 @@
                 </elements>
                 <criticalInstructions>
                     <instruction>
-                        Focus on patterns of uncertainty, not just individual comments with high pass
-                        rates. Identify themes among uncertain comments.
+                        Focus on the patterns of hesitation, not just individual statements.
+                        Identify themes among the statements that drew uncertainty.
                     </instruction>
                     <instruction>
                         Analyze what makes certain comments generate uncertainty - clarity issues,
@@ -89,22 +85,15 @@
                     </instruction>
                 </criticalInstructions>
                 <format>
-                    Analysis of voting patterns revealed [level_of_uncertainty] within this
-                    conversation, with approximately [percentage_range]% of comments receiving pass
-                    rates above the 20% threshold for notable uncertainty. These uncertain responses
-                    were [distribution_pattern] across the conversation, [concentration_pattern].
-                    [Additional_high_level_context].
-
-                    The highest levels of uncertainty appeared in comments addressing
-                    [topic_with_highest_uncertainty], with several statements reaching pass rates of
-                    [specific_high_percentage]% or more. These comments shared common features,
+                    Participants showed [level_of_uncertainty] uncertainty, most often on
+                    [topic_with_highest_uncertainty]. These statements shared common features,
                     including [shared_feature_1] and [shared_feature_2], suggesting that
                     [interpretation_of_uncertainty_cause]. [Additional_insight_if_relevant].
 
-                    Other significant areas of uncertainty included discussions of
-                    [secondary_uncertain_topic], particularly statements that [feature_of_uncertain_statements].
-                    This pattern suggests that participants were [hesitant/unclear/divided] about
-                    these topics, potentially due to [proposed_reason_for_uncertainty].
+                    Other areas of hesitation included discussions of [secondary_uncertain_topic],
+                    particularly statements that [feature_of_uncertain_statements]. This suggests
+                    participants were [hesitant/unclear/divided] about these topics, potentially
+                    because [proposed_reason_for_uncertainty].
                 </format>
                 <paragraphInstructions>
                     <instruction>
@@ -153,7 +142,7 @@
                     [specific_example_with_citation] demonstrated this pattern clearly.
 
                     [If group differences exist] Notably, uncertainty patterns varied across
-                    participant tribes. Tribe [X] showed markedly [higher/lower] pass rates on
+                    participant tribes. Tribe [X] was markedly [more/less] hesitant on
                     statements about [topic_with_group_difference], suggesting that
                     [interpretation_of_group_difference]. Meanwhile, Tribe [Y] demonstrated unique
                     uncertainty regarding [group_specific_uncertainty_topic], potentially indicating
@@ -205,7 +194,6 @@
 
         <specialCases>
             <case type="extremely_high_uncertainty">
-                <threshold>50</threshold>
                 <handling>
                     <action>highlight_as_exceptional</action>
                     <action>analyze_specific_causes</action>
@@ -256,7 +244,7 @@
     </analysisProcess>
 
     <validationRules>
-        <rule>All claims about uncertainty must be based on pass rate data</rule>
+        <rule>All claims about uncertainty must be grounded in the statements provided</rule>
         <rule>Each claim requires at least one citation</rule>
         <rule>Citations must use provided format</rule>
         <rule>Multiple causes of uncertainty must be considered</rule>
@@ -326,7 +314,7 @@
         {
         "clauses": [
         {
-        "text": "Analysis of voting patterns revealed moderate levels of uncertainty within this conversation, with approximately 25-30% of comments receiving pass rates above the 20% threshold for notable uncertainty.",
+        "text": "Participants showed moderate uncertainty, most often on statements that weighed competing considerations about community and housing.",
         "citations": [12, 15, 23]
         }
         ]
@@ -340,7 +328,7 @@
         {
         "clauses": [
         {
-        "text": "Several comments with high pass rates contained ambiguous terminology or complex sentence structures that likely contributed to voter hesitation.",
+        "text": "Several statements that drew hesitation contained ambiguous terminology or complex sentence structures that likely made them harder to judge.",
         "citations": [25, 31, 45]
         },
         {

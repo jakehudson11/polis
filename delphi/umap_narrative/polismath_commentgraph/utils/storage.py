@@ -264,13 +264,17 @@ class PostgresClient:
     
     def get_comments_by_conversation(self, zid: int) -> List[Dict[str, Any]]:
         """
-        Get all comments in a conversation.
-        
+        Get all comments in a conversation that participants can still see.
+
+        Statements the moderator removed are kept in the table with `active = false`; they stay in
+        the maths (which was computed before the removal) but must never reach a narrative, which
+        would then cite a statement the reader cannot resolve and count it as part of the survey.
+
         Args:
             zid: Conversation ID
-            
+
         Returns:
-            List of comments
+            List of active comments
         """
         sql = """
         SELECT 
@@ -285,6 +289,7 @@ class PostgresClient:
             comments 
         WHERE 
             zid = :zid
+            AND active = true
         ORDER BY 
             tid
         """

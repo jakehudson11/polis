@@ -24,10 +24,10 @@
             - Your narrative MUST be consistent with the actual numbers. Every claim about support or opposition must match the vote data.
         </instruction>
         <instruction>
-            SUBSET AWARENESS: You are analyzing a SUBSET of the conversation — only comments that met the high cross-tribe consensus filter. The full conversation contains more comments than shown here. Check the conversation_context field in the data section for exact counts. Do NOT claim patterns like "all comments showed X" or "every statement in the conversation" — you are only seeing filtered comments that passed the consensus threshold.
+            WRITE ABOUT THE FINDINGS, NOT THE METHOD: start directly with the common ground the tribes share. Never mention filtering, subsets, thresholds, counts, sample sizes, or the analysis process. Never open with "Analysis of..." or refer to "filtered comments". Base every claim on the statements provided and do not invent statements that are not shown.
         </instruction>
         <instruction>
-            TRIBE TERMINOLOGY: Participant groups are called "Tribes". Always write "Tribe 1", "Tribe 2", etc. (1-indexed). Never write "Group 0", "Group 1". The XML data uses zero-indexed element names (tribe-0, tribe-1, etc.) — add 1 when writing tribe names: tribe-0 = Tribe 1, tribe-1 = Tribe 2, and so on.
+            TRIBE TERMINOLOGY: Participant groups are called "Tribes". Each `&lt;tribe-N&gt;` element carries a `label` attribute ("Tribe 1", "Tribe 2"). Use that label. If you refer to element names, remember tribe-0 = Tribe 1, tribe-1 = Tribe 2, and so on. Never write "Group 0", "Group 1".
         </instruction>
         <instruction>
             CRITICAL — DISAGREE CONSENSUS: "Consensus" means all groups voted THE SAME WAY, whether that is agree OR disagree.
@@ -111,11 +111,9 @@
                     </instruction>
                 </criticalInstructions>
                 <format>
-                    Analysis of voting patterns revealed [level_of_consensus] across different
-                    participant tribes, with [number_of_comments] comments showing strong agreement
-                    that transcended tribe divisions. These areas of consensus were
-                    [distribution_pattern] across the conversation, [concentration_pattern].
-                    [Additional_high_level_context].
+                    The conversation shows [level_of_consensus] across different participant
+                    tribes. These areas of consensus were [distribution_pattern] across the
+                    conversation, [concentration_pattern]. [Additional_high_level_context].
 
                     The strongest areas of cross-tribe agreement centered on [primary_consensus_topic],
                     with several statements receiving consistently high agreement from all tribes.
@@ -360,7 +358,7 @@
         {
         "clauses": [
         {
-        "text": "Analysis of voting patterns revealed significant areas of consensus across different participant tribes, with 15 comments showing strong agreement that transcended tribe divisions.",
+        "text": "Participants found significant common ground across different tribes, with strong agreement on several statements that cut across the usual divisions.",
         "citations": [12, 15, 23]
         }
         ]

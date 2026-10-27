@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <polisAnalysisPrompt version="1.0">
     <metadata>
-        <title>Guide to Analyzing and Reporting A SINGLE TOPIC in Pol.is Conversations</title>
-        <purpose>Generate consistent, evidence-based reports comparing and describing the opinion
-            dynamics of the topic and output valid JSON</purpose>
+        <title>Guide to Describing A SINGLE TOPIC in Pol.is Conversations</title>
+        <purpose>Set the scene for deliberation on one topic by describing the statements grouped
+            into it, and output valid JSON</purpose>
     </metadata>
 
     <criticalInstructions>
@@ -21,189 +21,130 @@
         <instruction>
             Your output MUST be valid JSON. Do not use comments or trailing commas in the JSON.
         </instruction>
+        <instruction>
+            THE POINT OF THIS SECTION: a participant who has not yet deliberated should finish
+            reading it knowing what this topic is about and what there is to decide. It is a scene
+            setter for the group, not a report on how the group voted.
+        </instruction>
+        <instruction>
+            DO NOT compare opinion groups, tribes, factions or cohorts. Do not say which group
+            agrees, disagrees, is split, is more cautious, or how strongly any of them voted. The
+            reader does not need the group breakdown here, and describing it turns a briefing into a
+            scoreboard.
+        </instruction>
+        <instruction>
+            DO NOT describe agreement levels at all — no consensus, division, polarisation, majority,
+            unanimity, or vote percentages. Write about what the statements say, not about how they
+            were received.
+        </instruction>
     </criticalInstructions>
 
     <definitions>
-        <term name="differences_between_groups">
-            <description>Notable difference in views between groups on a single statement or related
-                set of statements within the topic</description>
-            <threshold>30</threshold>
-            <unit>percent</unit>
+        <term name="topic">
+            <description>A cluster of participant statements that the analysis grouped together
+                because they address the same subject</description>
         </term>
-        <term name="consensus">
-            <description>High level of agreement across all groups on a single statement or related
-                set of statements within the topic</description>
-            <threshold>at least 60% in each group</threshold>
-            <unit>percent</unit>
+        <term name="statement">
+            <description>A single participant-authored proposition that other participants voted on.
+                Cite statements by their id; the text is quoted for you in the data block.</description>
         </term>
     </definitions>
 
     <analysisProcess>
         <dataProcessing>
             <step order="1">
-                <n>Analyze Each Group's Positions</n>
+                <n>Read the statements</n>
                 <calculations>
-                    <calculation>group_positions</calculation>
-                    <calculation>per_group_vote_patterns</calculation>
-                    <pattern>group_distinctive_views</pattern>
+                    <calculation>group_statements_by_subject</calculation>
+                    <calculation>extract_the_positions_each_statement_takes</calculation>
                 </calculations>
             </step>
             <step order="2">
-                <n>Compare Group Positions</n>
+                <n>Identify what is at stake</n>
                 <calculations>
-                    <calculation>between_group_differences</calculation>
-                    <calculation>shared_positions</calculation>
+                    <calculation>identify_value_conflicts_between_statements</calculation>
+                    <calculation>identify_tradeoffs_and_conditions</calculation>
+                    <calculation>identify_shared_concerns_underneath_different_proposals</calculation>
                 </calculations>
             </step>
             <step order="3">
-                <n>Identify Patterns</n>
-                <patterns>
-                    <pattern>key_divergence_global</pattern>
-                </patterns>
+                <n>Frame the deliberation</n>
+                <calculations>
+                    <calculation>state_the_questions_the_topic_raises</calculation>
+                    <calculation>state_what_a_good_recommendation_would_have_to_answer</calculation>
+                </calculations>
             </step>
         </dataProcessing>
 
         <reportingStructure>
-            <paragraph type="topic_overview_and_consensus">
+            <paragraph type="topic_scene_setting">
                 <elements>
-                    <element>overview_topic_divisions</element>
-                    <element>major_divisions_between_groups</element>
-                    <element>differences_between_groups</element>
+                    <element>what_the_topic_is_about</element>
+                    <element>the_positions_present_across_the_statements</element>
+                    <element>the_tensions_and_tradeoffs_between_them</element>
+                    <element>the_questions_the_group_must_weigh</element>
                 </elements>
                 <criticalInstructions>
                     <instruction>
-                        In your overview, you must describe the statements on the topic, not the
-                        groups.
+                        Open by saying plainly what this topic covers and why it came up in the
+                        conversation. Name the subject, not the participants.
                     </instruction>
                     <instruction>
-                        You must describe the narrative which emerges from the division, not just a
-                        grabbag of
-                        topics. What are the key themes, values, and ideas that emerge from the
-                        division? What is the narrative that emerges from the division?
+                        Describe the specific positions the statements take. Say what a proposal
+                        would do, what condition it attaches, what it would cost, who it would
+                        affect — whatever the statements actually put on the table. Attribute them
+                        to the statements, never to groups.
                     </instruction>
                     <instruction>
-                        If any group group is split, or disagrees, say the votes on statements on
-                        the topic
-                        was split
-                        or divided. Consensus means greater than 60% agreement per group across all
-                        groups.
+                        Where statements pull in different directions, name the tension explicitly:
+                        for example a concern about harm sitting next to a concern about fairness, or
+                        a policy that would help one group of residents and inconvenience another.
+                        Explain the trade-off in terms of the arguments, not the vote split.
                     </instruction>
                     <instruction>
-                        DO NOT put any percentages in the text. DO NOT put any comment numbers in
-                        the text.
+                        Close with what the group needs to resolve on this topic — the open
+                        questions, the conditions that would have to be met, the choices still
+                        genuinely available. This is the brief the group takes into deliberation.
+                    </instruction>
+                    <instruction>
+                        DO NOT put any percentages, vote counts, comment counts, group names or tribe
+                        labels in the text.
+                    </instruction>
+                    <instruction>
+                        DO NOT claim that participants as a whole believe something. You are
+                        describing the content of the statements, not measuring opinion.
                     </instruction>
                 </criticalInstructions>
                 <format>
-                    The topic [topic_name] revealed several key patterns in the conversation.
-                    Participants
-                    expressed [strong/moderate/mixed] views on [specific_aspect], with
-                    [description_of_pattern]
-                    emerging as a central theme. The discourse around [topic_name] highlighted
-                    [key_value_or_concern], particularly in relation to [related_subtopic].
+                    The statements grouped under [topic_name] address [subject], and together they
+                    set out [number_of_distinct_positions] broadly different ways of thinking about
+                    it. One set of statements proposes [position], on the grounds that [reason].
+                    Another argues [contrasting_position], particularly where [condition_or_limit]
+                    applies. [Statement] goes further, connecting [subject] to [broader_concern].
 
-                    Within this topic, [specific_subtopic] generated [significant/notable/minimal]
-                    discussion,
-                    with participants [agreeing/disagreeing/divided] on [specific_position]. This
-                    connected to
-                    broader themes of [overarching_theme], especially regarding [specific_aspect].
-                    [Additional_context_if_relevant].
+                    The tension between these positions is [description_of_tension]:
+                    [value_or_interest] points one way, while [competing_value_or_interest] points the
+                    other. Several statements attach conditions rather than taking a side —
+                    [condition] — which is where much of the practical difficulty sits.
 
-                    The conversation revealed [X] distinct perspectives on [topic_name], ranging
-                    from
-                    [perspective_1] to [perspective_2]. These viewpoints often intersected with
-                    [related_topic_or_theme], particularly when discussing [specific_aspect].
-                    Notable areas
-                    of [consensus/division] included [specific_examples], which highlighted
-                    [pattern_or_insight].
-
-                    [If consensus exists] Common ground emerged around [consensus_point], with
-                    participants
-                    across groups expressing support for [specific_position]. This alignment was
-                    particularly
-                    evident in discussions of [specific_aspect], where
-                    [description_of_consensus_pattern].
-
-                    [If division exists] Key divisions centered on [point_of_contention], with
-                    varying
-                    perspectives on [specific_aspect]. These differences reflected broader
-                    [values/priorities/concerns] within the conversation, particularly regarding
-                    [specific_element].
+                    For the group, the topic turns on [question_to_resolve] and on whether [tradeoff]
+                    can be settled in a way that [criterion]. A recommendation that does not answer
+                    [open_question] is unlikely to hold.
                 </format>
                 <paragraphInstructions>
                     <instruction>
-                        This format should provide a comprehensive overview of the topic, including:
-                        - Core themes and patterns
-                        - Specific areas of consensus and division
-                        - Connection to broader conversation themes
-                        - Multiple supporting citations for each claim
-                        - Clear narrative progression
-                        - Balance between specific details and broader patterns
+                        Every claim must be traceable to a statement you cite. If you cannot point at
+                        a statement for a sentence, delete the sentence.
                     </instruction>
                     <instruction>
-                        Each major point should be supported by multiple citations, with clear
-                        connections
-                        between related statements and themes.
+                        Prefer concrete nouns taken from the statements over abstract framing. Say
+                        "ring-fenced taxation on second homes", not "fiscal mechanisms".
+                    </instruction>
+                    <instruction>
+                        Do not restate the topic label as the opening sentence.
                     </instruction>
                 </paragraphInstructions>
-                <length>4-6 sentences per paragraph, with multiple paragraphs as needed to cover the
-                    topic
-                    comprehensively</length>
-            </paragraph>
-            <paragraph type="topic_by_groups">
-                <elements>
-                    <element>voting_patterns</element>
-                    <element>core_beliefs</element>
-                    <element>key_positions</element>
-                    <element>group_relationships</element>
-                    <element>value_priorities</element>
-                </elements>
-                <criticalInstructions>
-                    <instruction>
-                        There will be a variable number of groups. You must analyze how each group
-                        relates to the topic, including both direct comparisons and broader
-                        patterns.
-                    </instruction>
-                    <instruction>
-                        Focus on the substantive differences in how groups understand and approach
-                        the topic, not just agreement levels.
-                    </instruction>
-                    <instruction>
-                        Identify and explain any notable alignments or coalitions between groups
-                        on specific aspects of the topic.
-                    </instruction>
-                </criticalInstructions>
-                <format>
-                    On [topic_name], clear differences emerged between the groups' approaches and
-                    underlying values. Group [A] demonstrated [strong/moderate/mixed]
-                    [agreement/disagreement] with [specific_aspect], reflecting their emphasis on
-                    [value_or_priority]. In contrast, Group [B] approached the topic through the
-                    lens
-                    of [different_value_or_priority], leading to [strong/moderate/mixed]
-                    [agreement/disagreement] with these statements.
-
-                    Group [C]'s perspective aligned more closely with [Group A/B] on
-                    [specific_aspect],
-                    particularly regarding [detailed_position]. However, they diverged notably on
-                    [different_aspect], where their [agreement/disagreement] reflected distinct
-                    [values/priorities/concerns].
-
-                    [If more than three groups] The remaining groups showed varying degrees of
-                    alignment, with Groups [D] and [E] finding common ground on [shared_aspect]
-                    while diverging on [point_of_contention]. This pattern highlighted how
-                    [broader_theme_or_insight] shaped group positions on [topic_name].
-
-                </format>
-                <paragraphInstructions>
-                    <instruction>
-                        Each paragraph should:
-                        - Analyze group positions through their underlying values and priorities
-                        - Identify both expected and unexpected alignments
-                        - Connect specific positions to broader themes
-                        - Support all claims with multiple citations
-                        - Maintain focus on the specific topic while acknowledging broader patterns
-                    </instruction>
-                </paragraphInstructions>
-                <length>3-5 paragraphs, depending on number of groups and complexity of positions</length>
+                <length>2-4 paragraphs, long enough to brief the group and no longer</length>
             </paragraph>
         </reportingStructure>
 
@@ -220,54 +161,43 @@
 
         <validationRequirements>
             <dataQuality>
-                <requirement>minimum_votes_per_cited_statement>25</requirement>
+                <requirement>every_position_attributed_to_a_cited_statement>true</requirement>
             </dataQuality>
 
             <reportingCompleteness>
-                <requirement>all_groups_represented>true</requirement>
-                <requirement>patterns_explained>true</requirement>
-                <requirement>special_cases_noted>true</requirement>
+                <requirement>topic_subject_stated>true</requirement>
+                <requirement>positions_described>true</requirement>
+                <requirement>tensions_named>true</requirement>
+                <requirement>open_questions_stated>true</requirement>
             </reportingCompleteness>
         </validationRequirements>
-
-        <specialCases>
-            <case type="extreme_divergence">
-                <threshold>40</threshold>
-                <handling>
-                    <action>highlight_difference</action>
-                    <action>provide_context</action>
-                    <action>check_related_statements</action>
-                </handling>
-            </case>
-        </specialCases>
 
         <languageGuidelines>
             <topicTerms>
                 <term>topic</term>
                 <term>subtopic</term>
-                <term>across</term>
-                <term>between</term>
-                <term>within</term>
-                <term>among</term>
-                <term>around</term>
-                <term>concerning</term>
-                <term>regarding</term>
+                <term>statement</term>
+                <term>proposal</term>
+                <term>concern</term>
+                <term>condition</term>
+                <term>trade-off</term>
             </topicTerms>
 
             <styleRules>
                 <rule>avoid_repetitive_structures</rule>
                 <rule>connect_ideas_clearly</rule>
                 <rule>maintain_neutral_tone</rule>
+                <rule>describe_the_argument_not_the_audience</rule>
             </styleRules>
         </languageGuidelines>
 
         <qualityChecklist>
             <check>claims_supported_by_data</check>
             <check>citation_rules_followed</check>
-            <check>groups_fairly_represented</check>
-            <check>patterns_properly_identified</check>
-            <check>special_cases_noted</check>
-            <check>context_provided</check>
+            <check>no_group_comparison</check>
+            <check>no_agreement_levels</check>
+            <check>topic_subject_stated</check>
+            <check>tensions_and_open_questions_stated</check>
             <check>citations_properly_formatted</check>
             <check>language_varied_and_clear</check>
         </qualityChecklist>
@@ -277,19 +207,18 @@
         <rule>All high/low must be actual values from data</rule>
         <rule>Each claim requires at least one citation</rule>
         <rule>Citations must use provided format</rule>
-        <rule>Groups must be referenced by actual group names from data, such as Group A, Group B,
-            etc.</rule>
-        <rule>no percentages from comment data inserted in the text</rule>
+        <rule>No group, tribe or cohort may be named or compared</rule>
+        <rule>No percentages, vote counts, consensus or division language in the text</rule>
     </validationRules>
 
     <responseFormat>
         <condensedJSONSchema>
             {
-            "id": "topic_overview_and_consensus",
-            "title": "Overview of Topic and Consensus",
+            "id": "topic_scene_setting",
+            "title": "What This Topic Is About",
             "paragraphs": [
             {
-            "id": "string", // e.g. "groups_overview"
+            "id": "string", // e.g. "subject_and_positions"
             "title": "string",
             "sentences": [
             {
@@ -322,7 +251,7 @@
             };
 
             type Paragraph = {
-            id: string; // e.g. "topic_overview_and_consensus"
+            id: string; // e.g. "subject_and_positions"
             title: string;
             sentences: Sentence[];
             };
@@ -336,90 +265,40 @@
     </responseFormat>
     <example>
         {
-        "id": "topic_overview_and_consensus",
-        "title": "Overview of Topic and Consensus",
+        "id": "topic_scene_setting",
+        "title": "What This Topic Is About",
         "paragraphs": [
         {
-        "id": "topic_overview",
-        "title": "Overview of Topic and Consensus",
+        "id": "subject_and_positions",
+        "title": "The Subject and the Positions on It",
         "sentences": [
         {
         "clauses": [
         {
-        "text": "[topic] is a [topic_overview]",
-        "citations": [12, 15, 23]
+        "text": "The statements grouped under this topic concern whether short-term holiday lets harm host communities more than second homes do.",
+        "citations": [6]
+        }
+        ]
         },
         {
-        "text": "[topic] is a [topic_overview]",
-        "citations": [25, 31]
-        },
+        "clauses": [
         {
-        "text": "[topic] is a [topic_overview]",
-        "citations": [45, 48]
+        "text": "One position treats the two as different problems, arguing that a let which turns over every week removes a home from the village in a way a second home does not.",
+        "citations": [6, 9]
         }
         ]
         }
         ]
         },
         {
-        "id": "topic_by_groups",
-        "title": "Differences on [topic]",
+        "id": "open_questions",
+        "title": "What the Group Has to Weigh",
         "sentences": [
         {
         "clauses": [
         {
-        "text": "[topic] is a [topic_overview]",
-        "citations": [52, 54]
-        },
-        {
-        "text": "[topic] is a [topic_overview]",
-        "citations": [61, 63]
-        }
-        ]
-        },
-        {
-        "clauses": [
-        {
-        "text": "[topic] is a [topic_overview]",
-        "citations": [71, 73]
-        },
-        {
-        "text": "[topic] is a [topic_overview]",
-        "citations": [75, 78]
-        }
-        ]
-        },
-        {
-        "clauses": [
-        {
-        "text": "[topic] is a [topic_overview]",
-        "citations": [82, 85, 87]
-        }
-        ]
-        }
-        ]
-        },
-        {
-        "id": "topic_subtopic_analysis",
-        "title": "Subtopic Analysis",
-        "sentences": [
-        {
-        "clauses": [
-        {
-        "text": "[topic] is a [topic_overview]",
-        "citations": [91, 93]
-        },
-        {
-        "text": "[topic] is a [topic_overview]",
-        "citations": [95, 97]
-        }
-        ]
-        },
-        {
-        "clauses": [
-        {
-        "text": "[topic] is a [topic_overview]",
-        "citations": [101, 103, 105]
+        "text": "The group has to decide whether the distinction changes what should be done, or whether both forms of non-resident ownership call for the same response.",
+        "citations": [6, 12]
         }
         ]
         }

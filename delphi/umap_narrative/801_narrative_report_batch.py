@@ -22,6 +22,7 @@ Args:
 import os
 import sys
 import json
+import math
 import time
 import uuid
 import logging
@@ -48,6 +49,7 @@ import traceback  # Added for detailed error tracing
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from umap_narrative.llm_factory_constructor import get_model_provider, AgoraProxyProvider
 from umap_narrative.llm_factory_constructor.model_provider import AnthropicProvider, AgoraProxyBatchClient, AgoraProxyStatusError, AgoraProxyTransportError, BatchNotCompleteError, agora_batch_configured
+from umap_narrative.agora_math_snapshot import fetch_agora_math_snapshot, resolve_agora_deliberation_id
 
 # Import from local modules
 from polismath_commentgraph.utils.storage import PostgresClient, DynamoDBStorage
@@ -56,6 +58,41 @@ from polismath_commentgraph.utils.group_data import GroupDataProcessor
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+# Share of a tribe that must have cast an agree/disagree vote before a statement may be described
+# as a tribe position. A share rather than an absolute count so it holds for tribes of any size: a
+# tribe of 5 must cast 3 votes, a tribe of 3 must cast 2.
+MIN_TRIBE_TURNOUT = 0.5
+
+# Minimum distinctiveness ratio for tribe characteristics. The score is Pol.is repness - this
+# tribe's smoothed share divided by the other tribes' combined smoothed share - so 1.0 is "average"
+# and 1.5 means the tribe is at least 50% more likely to take that position.
+TRIBE_CHARACTERISTIC_RATIO = 1.5
+
+# Significance gate for a characteristic, as a one-sided two-proportion z-score. 1.2816 is Pol.is's
+# own 90% threshold (see `passes-by-test?` in math/src/polismath/math/repness.clj).
+TRIBE_CHARACTERISTIC_Z = 1.2816
+
+# Minimum gap between the most and least agreeing tribe for Group Divisions, in share points.
+# Keep this aligned with MIN_POLARISATION_GAP_POINTS in the Agora frontend.
+MIN_POLARISATION_GAP = 0.25
+
+# Minimum overall pass rate for Points of Uncertainty. Keep this aligned with
+# UNCERTAINTY_PASS_RATE in the Agora frontend.
+UNCERTAINTY_PASS_RATE = 0.2
+
+
+def _as_number(value, default: float = 0.0) -> float:
+    """Coerce a possibly-string, possibly-Decimal numeric field."""
+    if value is None or isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 class NarrativeReportService:
     """Storage service for narrative reports in DynamoDB."""
@@ -189,6 +226,7 @@ class PolisConverter:
             # Add data for each group
             for group_id in group_keys:
                 group = ET.SubElement(comment, f"tribe-{group_id}", {
+                    "label": f"Tribe {int(group_id) + 1}",
                     "votes": str(record.get(f"group-{group_id}-votes", 0)),
                     "agrees": str(record.get(f"group-{group_id}-agrees", 0)),
                     "disagrees": str(record.get(f"group-{group_id}-disagrees", 0)),
@@ -244,6 +282,49 @@ class BatchReportGenerator:
         current_dir = Path(__file__).parent
         self.prompt_base_path = current_dir / "report_experimental"
     
+    def _get_stored_math_snapshot(self):
+        """Return the exact math payload Agora's results page displays.
+
+        The page reads `agora_polis_results.math_pca2`, captured when results were
+        generated. Re-reading live `math_main` here let the narrative disagree with
+        the page whenever Pol.is re-ticked (k-means is stochastic) between the
+        snapshot and the report stage. Returns None when the snapshot cannot be
+        resolved so callers can fall back to `math_main`.
+        """
+        if not self.deliberation_id:
+            logger.info(
+                'No deliberation id on this report job; resolving it from conversation %s',
+                self.conversation_id,
+            )
+            self.deliberation_id = resolve_agora_deliberation_id(str(self.conversation_id))
+
+        # Older job pollers set DELIBERATION_ID to the numeric zid as a fallback.
+        # Treat that as "missing" and resolve the real Agora id from the mapping.
+        if self.deliberation_id and (
+            str(self.deliberation_id) == str(self.conversation_id)
+            or str(self.deliberation_id).isdigit()
+        ):
+            resolved = resolve_agora_deliberation_id(str(self.conversation_id))
+            if resolved:
+                self.deliberation_id = resolved
+
+        if not self.deliberation_id:
+            logger.info(
+                'Could not resolve an Agora deliberation id for conversation %s; '
+                'skipping math snapshot lookup',
+                self.conversation_id,
+            )
+            return None
+
+        math_data = fetch_agora_math_snapshot(str(self.deliberation_id))
+        if math_data:
+            logger.info(
+                'Using stored Agora math snapshot for deliberation %s (math_tick=%s)',
+                self.deliberation_id,
+                math_data.get('math_tick'),
+            )
+        return math_data
+
     def _get_math_main_data(self, conversation_id):
         """
         Get pre-calculated math data from the Clojure math pipeline stored in math_main table.
@@ -320,11 +401,25 @@ class BatchReportGenerator:
             if self.include_moderation:
                 comments = [comment for comment in comments if comment['mod'] > -1]
 
+            # Prefer the stored Agora snapshot: it is the exact payload the results
+            # page renders. Re-reading live math_main here is what let the report
+            # describe a different tribe split whenever Pol.is re-ticked between
+            # results generation and the narrative stage.
+            math_data = self._get_stored_math_snapshot()
+            if not math_data:
+                logger.warning(
+                    f"No stored Agora math snapshot for conversation {self.conversation_id}; "
+                    "falling back to live math_main"
+                )
+                math_data = self._get_math_main_data(int(self.conversation_id))
+
             # Get basic comment + vote data in the export format expected downstream.
-            # This path is compatible with local/dev where the legacy Clojure math_main table may be empty.
+            # Passing math_data makes the per-tribe vote counts and assignments come
+            # from the same snapshot the page displays.
             export_data = self.group_processor.get_export_data(
                 int(self.conversation_id),
                 self.include_moderation,
+                math_data=math_data,
             )
             processed_comments = export_data.get('comments', [])
 
@@ -363,16 +458,14 @@ class BatchReportGenerator:
                     "Cannot generate narratives without vote data."
                 )
 
-            # Attempt to load pre-calculated metrics from the legacy Clojure math pipeline (math_main).
-            # If absent, keep GroupDataProcessor metrics (which may be DynamoDB-backed) instead of failing.
-            math_data = self._get_math_main_data(int(self.conversation_id))
+            # Apply pre-calculated metrics from the resolved math payload.
             if math_data:
                 tids = math_data.get('tids', [])
                 extremity_array = math_data.get('pca', {}).get('comment-extremity', [])
                 consensus_object = math_data.get('group-aware-consensus', {})
 
                 logger.info(
-                    f"Retrieved {len(tids)} comment IDs with pre-calculated metrics from Clojure math pipeline"
+                    f"Retrieved {len(tids)} comment IDs with pre-calculated metrics from the math payload"
                 )
 
                 extremity_map = {}
@@ -392,14 +485,21 @@ class BatchReportGenerator:
 
                 logger.info(f"Extremity override: {len(extremity_map)} mapped, "
                             f"{sum(1 for v in extremity_map.values() if v > 1.0)} exceed 1.0")
+
                 logger.info(
-                    f"Applied Clojure math_main-derived metrics to {len(processed_comments)} exported comments"
+                    f"Applied math-derived metrics to {len(processed_comments)} exported comments"
                 )
             else:
                 logger.warning(
-                    f"No math_main data available for conversation {self.conversation_id}; "
+                    f"No math data available for conversation {self.conversation_id}; "
                     "continuing with GroupDataProcessor-derived metrics."
                 )
+
+            # Cross-tribe gap per comment: how far apart the most and least agreeing tribe are.
+            # This is what the "Group Divisions" narrative describes. It is NOT
+            # `comment_extremity`, which is the length of a comment's PCA projection and is high for
+            # any unusual vote pattern — including statements every tribe rejects.
+            self._annotate_cross_tribe_gap(processed_comments, math_data)
             
             # Load cluster assignments from DynamoDB
             cluster_map = self.load_comment_clusters_from_dynamodb(self.conversation_id)
@@ -608,9 +708,9 @@ class BatchReportGenerator:
             
             global_topic_prefix = f"{self.job_id}_global"
             global_sections = [
-                {"section_type": "global", "name": "groups", "topic_key": f"{global_topic_prefix}_groups", "filter_type": "comment_extremity", "filter_threshold": 1.0},
+                {"section_type": "global", "name": "groups", "topic_key": f"{global_topic_prefix}_groups", "filter_type": "cross_tribe_gap", "filter_threshold": MIN_POLARISATION_GAP},
                 {"section_type": "global", "name": "group_informed_consensus", "topic_key": f"{global_topic_prefix}_group_informed_consensus", "filter_type": "group_aware_consensus", "filter_threshold": "dynamic"},
-                {"section_type": "global", "name": "uncertainty", "topic_key": f"{global_topic_prefix}_uncertainty", "filter_type": "uncertainty_ratio", "filter_threshold": 0.2}
+                {"section_type": "global", "name": "uncertainty", "topic_key": f"{global_topic_prefix}_uncertainty", "filter_type": "uncertainty_ratio", "filter_threshold": UNCERTAINTY_PASS_RATE}
             ]
             for section in global_sections: # Ensure placeholder keys exist
                 section.setdefault('citations', [])
@@ -683,7 +783,8 @@ class BatchReportGenerator:
         
         Args:
             comment: Comment data dictionary
-            filter_type: Type of filter ('comment_extremity', 'group_aware_consensus', 'uncertainty_ratio')
+            filter_type: Type of filter ('comment_extremity', 'cross_tribe_gap',
+                'group_aware_consensus', 'uncertainty_ratio')
             filter_threshold: Threshold value for filtering (or 'dynamic' for group_aware_consensus)
             
         Returns:
@@ -698,6 +799,11 @@ class BatchReportGenerator:
             elif filter_type == "group_aware_consensus":
                 # Filter for comments with broad cross-group agreement
                 # Uses dynamic thresholds based on number of groups
+                # Same turnout policy as the division filter: a consensus measured over one voter
+                # is not a consensus.
+                min_turnout = comment.get('cross_tribe_min_turnout')
+                if min_turnout is not None and min_turnout < MIN_TRIBE_TURNOUT:
+                    return False
                 consensus = comment.get('group_aware_consensus', 0)
                 num_groups = comment.get('num_groups', 2)
                 
@@ -741,7 +847,16 @@ class BatchReportGenerator:
                     
                 uncertainty_ratio = passes / votes
                 return uncertainty_ratio >= filter_threshold
-                
+
+            elif filter_type == "cross_tribe_gap":
+                # Filter for comments where the tribes disagree most: the gap between the most and
+                # least agreeing tribe's agree share. Statements where any tribe failed the turnout
+                # bar carry no gap and are excluded.
+                gap = comment.get('cross_tribe_gap')
+                if gap is None:
+                    return False
+                return gap >= filter_threshold
+
             else:
                 logger.warning(f"Unknown filter type: {filter_type}")
                 return False
@@ -750,6 +865,101 @@ class BatchReportGenerator:
             logger.error(f"Error applying global filter {filter_type}: {str(e)}")
             return False
     
+    def _derive_group_sizes(self, processed_comments, math_data) -> Dict[str, int]:
+        """Participants per tribe, so turnout can be measured against the tribe and not the audience.
+
+        Uses the same base-cluster counts the frontend derives tribe sizes from, and falls back to
+        the widest audience a tribe was ever shown when the math payload is unavailable.
+        """
+        sizes: Dict[str, int] = {}
+        math = math_data if isinstance(math_data, dict) else {}
+        group_clusters = math.get('group-clusters') or []
+        base_clusters = math.get('base-clusters') or {}
+
+        count_by_base: Dict[int, int] = {}
+        base_ids = base_clusters.get('id') or []
+        base_counts = base_clusters.get('count') or []
+        for index, base_id in enumerate(base_ids):
+            if index >= len(base_counts):
+                continue
+            try:
+                count_by_base[int(base_id)] = int(base_counts[index])
+            except (TypeError, ValueError):
+                continue
+
+        for cluster in group_clusters:
+            if not isinstance(cluster, dict):
+                continue
+            try:
+                gid = int(cluster.get('id'))
+            except (TypeError, ValueError):
+                continue
+            total = 0
+            found = False
+            for member in cluster.get('members') or []:
+                try:
+                    count = count_by_base.get(int(member))
+                except (TypeError, ValueError):
+                    count = None
+                if count is not None:
+                    total += count
+                    found = True
+            if found and total > 0:
+                sizes[str(gid)] = total
+
+        for record in processed_comments:
+            for key, value in record.items():
+                if not (isinstance(key, str) and key.startswith('group-') and key.endswith('-votes')):
+                    continue
+                gid = key[len('group-'):-len('-votes')]
+                if gid in sizes:
+                    continue
+                seen = int(_as_number(value))
+                if seen > sizes.get(gid, 0):
+                    sizes[gid] = seen
+
+        return sizes
+
+    def _annotate_cross_tribe_gap(self, processed_comments, math_data) -> None:
+        """Attach `cross_tribe_gap` (and the turnout behind it) to each comment record.
+
+        The gap is the difference between the most and least agreeing tribe's agree share. Shares
+        are taken over everyone the tribe was shown the statement (A/S), so passes count against
+        agreement — the same definition the Results page uses. A statement is only eligible when
+        every tribe cast agree/disagree votes for at least MIN_TRIBE_TURNOUT of its participants,
+        so one voter cannot define a tribe's position. Ineligible statements get `None` and are
+        excluded by the filter.
+        """
+        group_sizes = self._derive_group_sizes(processed_comments, math_data)
+        if len(group_sizes) < 2:
+            for record in processed_comments:
+                record['cross_tribe_gap'] = None
+                record['cross_tribe_min_turnout'] = None
+            return
+
+        for record in processed_comments:
+            shares = []
+            turnouts = []
+            eligible = True
+            for gid, size in group_sizes.items():
+                agrees = _as_number(record.get(f'group-{gid}-agrees'))
+                disagrees = _as_number(record.get(f'group-{gid}-disagrees'))
+                seen = _as_number(record.get(f'group-{gid}-votes'))
+                cast = agrees + disagrees
+                tribe_size = size if size and size > 0 else cast
+                if cast <= 0 or seen <= 0 or tribe_size <= 0 or (cast / tribe_size) < MIN_TRIBE_TURNOUT:
+                    eligible = False
+                    break
+                shares.append(agrees / seen)
+                turnouts.append(cast / tribe_size)
+
+            if eligible and len(shares) >= 2:
+                record['cross_tribe_gap'] = max(shares) - min(shares)
+                record['cross_tribe_min_turnout'] = min(turnouts)
+            else:
+                record['cross_tribe_gap'] = None
+                record['cross_tribe_min_turnout'] = None
+
     def _get_dynamic_comment_limit(self, layer_id=None, total_layers=None, comment_count=None, filter_type=None):
         """
         Calculate dynamic comment limit based on layer granularity and conversation size.
@@ -854,6 +1064,9 @@ class BatchReportGenerator:
                     total_votes = comment.get('votes', 1)
                     uncertainty = passes / max(total_votes, 1)
                     metric_score = uncertainty * 1000  # Scale up for sorting
+                elif filter_type == "cross_tribe_gap":
+                    # For division filtering, prioritize the widest gap between tribes
+                    metric_score = (comment.get('cross_tribe_gap') or 0) * 1000
                 else:
                     # For topic filtering, use a combination of votes and engagement
                     agrees = comment.get('agrees', 0)
@@ -1001,8 +1214,14 @@ class BatchReportGenerator:
                             continue
         return sorted(group_ids)
 
-    def _select_comments_for_tribe_consensus(self, processed_comments: List[Dict[str, Any]], group_id: int, agree_threshold: float = 0.6, disagree_threshold: float = 0.3, limit: int = 50) -> Dict[str, List[Dict[str, Any]]]:
+    def _select_comments_for_tribe_consensus(self, processed_comments: List[Dict[str, Any]], group_id: int, agree_threshold: float = 0.6, disagree_threshold: float = 0.6, limit: int = 50, tribe_size: int = 0) -> Dict[str, List[Dict[str, Any]]]:
         """Select comments with strong group agreement or disagreement.
+
+        Both directions use the same 60% bar so "strong" means the same thing whether the tribe
+        approved or rejected the statement. The rate is over everyone who saw the comment, so the
+        payload also carries the raw counts; and a statement is skipped unless the tribe cast
+        agree/disagree votes for at least MIN_TRIBE_TURNOUT of its participants, so one voter
+        cannot define a tribe position.
 
         Returns dict with 'strong_agree' and 'strong_disagree' lists, each capped at limit.
         """
@@ -1032,6 +1251,13 @@ class BatchReportGenerator:
             agree_rate = tribe_agrees / tribe_votes
             disagree_rate = tribe_disagrees / tribe_votes
 
+            # Turnout guard: measure the tribe, not the audience. Without it a statement only one
+            # person saw and disagreed with reads as unanimous.
+            cast = tribe_agrees + tribe_disagrees
+            denominator = tribe_size if tribe_size and tribe_size > 0 else tribe_votes
+            if cast <= 0 or (cast / denominator) < MIN_TRIBE_TURNOUT:
+                continue
+
             entry = {
                 "comment_id": c.get('comment_id', c.get('comment-id')),
                 "text": c.get('comment', ''),
@@ -1055,134 +1281,161 @@ class BatchReportGenerator:
             "strong_disagree": strong_disagree[:limit],
         }
 
-    def _select_comments_for_tribe_characteristics(self, processed_comments: List[Dict[str, Any]], group_id: int, limit: int = 30, math_data: dict = None) -> List[Dict[str, Any]]:
-        """Select comments that most characteristically represent this group.
+    def _select_comments_for_tribe_characteristics(self, processed_comments: List[Dict[str, Any]], group_id: int, limit: Optional[int] = None, math_data: dict = None, tribe_size: int = 0) -> List[Dict[str, Any]]:
+        """Statements that most distinguish a tribe from the others.
 
-        Uses Clojure repness scores when available (preferred), falling back to
-        a simple distinctiveness heuristic based on agree-rate difference.
+        `limit=None` returns every qualifying statement, which is what the title and
+        characteristics payloads use so both describe the same set as the card.
 
-        Returns list sorted by representativeness descending, capped at limit.
+        One rule for every conversation, large or small, so a statement is included or excluded on
+        identical arithmetic regardless of how many tribes were found or how small they are:
+
+            ratio = Pol.is repness - this tribe's smoothed share divided by the other tribes'
+                    combined smoothed share - measured separately over agree, disagree and pass
+            kind  = whichever of the three has the largest ratio
+            gate  = ratio >= TRIBE_CHARACTERISTIC_RATIO and z > TRIBE_CHARACTERISTIC_Z
+
+        Pass is scored in its own right: an abstention is a characteristic, and it must not be
+        reported as a rejection. Laplace smoothing keeps ratios finite for a three-person tribe,
+        and the z-test separates a decisive split from one vote's worth of noise. A tribe whose best
+        statement clears the ratio floor but not the significance gate keeps that statement, marked
+        `significant = False`, mirroring Pol.is `beats-best-by-test?`.
         """
         def _coerce_float(value, default=0.0):
-            if value is None:
+            if value is None or isinstance(value, bool):
                 return default
-            if isinstance(value, bool):
-                return float(int(value))
             if isinstance(value, (int, float)):
                 return float(value)
-            if isinstance(value, str):
-                try:
-                    return float(value.strip())
-                except ValueError:
-                    return default
-            return default
+            try:
+                return float(str(value).strip())
+            except (TypeError, ValueError):
+                return default
 
-        # --- Primary path: Clojure repness from math_main ---
-        if math_data and isinstance(math_data, dict):
-            repness_all = math_data.get('repness', {})
-            group_repness = repness_all.get(str(group_id), [])
-            if group_repness:
-                # Build a lookup from tid -> original comment record for enrichment
-                comment_by_tid = {}
-                for c in processed_comments:
-                    cid = c.get('comment_id', c.get('comment-id'))
-                    if cid is not None:
-                        comment_by_tid[int(cid)] = c
+        def _group_ids(record: Dict[str, Any]) -> List[str]:
+            ids = []
+            for key in record.keys():
+                if isinstance(key, str) and key.startswith('group-') and key.endswith('-votes'):
+                    ids.append(key[len('group-'):-len('-votes')])
+            return ids
 
-                results = []
-                for entry in group_repness:
-                    repful_for = entry.get('repful-for', 'agree')
-                    score = _coerce_float(entry.get('repness', 0))
-                    if score < 1.0:
-                        continue
-                    tid = int(entry.get('tid', -1))
-                    original = comment_by_tid.get(tid, {})
+        def _smoothed_ratio(successes: float, shown: float, rest_successes: float, rest_shown: float) -> float:
+            tribe_rate = (successes + 1.0) / (shown + 2.0)
+            rest_rate = (rest_successes + 1.0) / (rest_shown + 2.0)
+            return tribe_rate / rest_rate if rest_rate > 0 else float('inf')
 
-                    tribe_votes = _coerce_float(original.get(f'group-{group_id}-votes', 0))
-                    overall_votes = _coerce_float(original.get('votes', original.get('total-votes', 0)))
-                    tribe_agrees = _coerce_float(original.get(f'group-{group_id}-agrees', 0))
-                    overall_agrees = _coerce_float(original.get('agrees', original.get('total-agrees', 0)))
-                    tribe_agree_rate = (tribe_agrees / tribe_votes) if tribe_votes > 0 else 0.0
-                    overall_agree_rate = (overall_agrees / overall_votes) if overall_votes > 0 else 0.0
+        def _two_proportion_z(successes: float, shown: float, rest_successes: float, rest_shown: float) -> float:
+            """Pol.is `two-prop-test`, including its +1 adjustment and unanimous answer."""
+            succ_in, succ_out = successes + 1.0, rest_successes + 1.0
+            pop_in, pop_out = shown + 1.0, rest_shown + 1.0
+            pooled = (succ_in + succ_out) / (pop_in + pop_out)
+            if pooled >= 1:
+                return 0.0
+            return ((succ_in / pop_in) - (succ_out / pop_out)) / math.sqrt(
+                pooled * (1 - pooled) * ((1 / pop_in) + (1 / pop_out))
+            )
 
-                    results.append({
-                        "comment_id": tid,
-                        "text": original.get('comment', ''),
-                        "repful_for": repful_for,
-                        "distinctiveness_score": round(score, 4),
-                        "tribe_agree_rate": round(tribe_agree_rate, 4),
-                        "overall_agree_rate": round(overall_agree_rate, 4),
-                        "tribe_agrees": int(tribe_agrees),
-                        "tribe_votes": int(tribe_votes),
-                        "overall_votes": int(overall_votes),
-                    })
-
-                # Split into agree and disagree, each sorted by score
-                agrees = sorted([r for r in results if r.get('repful_for') == 'agree'],
-                                key=lambda x: x['distinctiveness_score'], reverse=True)
-                disagrees = sorted([r for r in results if r.get('repful_for') == 'disagree'],
-                                   key=lambda x: x['distinctiveness_score'], reverse=True)
-
-                # Balanced selection: aim for ~60% agree, ~40% disagree
-                target_disagree = max(1, int(limit * 0.4)) if disagrees else 0
-                target_agree = limit - target_disagree
-
-                # Adjust if one pool is too small
-                if len(disagrees) < target_disagree:
-                    target_disagree = len(disagrees)
-                    target_agree = min(len(agrees), limit - target_disagree)
-                if len(agrees) < target_agree:
-                    target_agree = len(agrees)
-                    target_disagree = min(len(disagrees), limit - target_agree)
-
-                balanced = agrees[:target_agree] + disagrees[:target_disagree]
-                balanced.sort(key=lambda x: x['distinctiveness_score'], reverse=True)
-
-                agree_count = sum(1 for r in balanced if r.get('repful_for') == 'agree')
-                disagree_count = len(balanced) - agree_count
-                logger.info(f"Tribe {group_id} characteristics: {len(balanced)}/{len(results)} comments from Clojure repness (>= 1.0) — {agree_count} agree, {disagree_count} disagree (balanced)")
-                return balanced[:limit]
-
-        # --- Fallback: simple distinctiveness heuristic ---
-        logger.info(f"Tribe {group_id} characteristics: falling back to agree-rate distinctiveness (no Clojure repness)")
-        results = []
+        candidates = []
         for c in processed_comments:
-            tribe_votes = _coerce_float(c.get(f'group-{group_id}-votes', 0))
-            overall_votes = _coerce_float(c.get('votes', c.get('total-votes', 0)))
-            if tribe_votes <= 0 or overall_votes <= 0:
+            mine_votes = _coerce_float(c.get(f'group-{group_id}-votes', 0))
+            if mine_votes <= 0:
                 continue
-            tribe_agrees = _coerce_float(c.get(f'group-{group_id}-agrees', 0))
-            overall_agrees = _coerce_float(c.get('agrees', c.get('total-agrees', 0)))
-            tribe_agree_rate = tribe_agrees / tribe_votes
-            overall_agree_rate = overall_agrees / overall_votes
-            distinctiveness = abs(tribe_agree_rate - overall_agree_rate)
+            mine_agrees = _coerce_float(c.get(f'group-{group_id}-agrees', 0))
+            mine_disagrees = _coerce_float(c.get(f'group-{group_id}-disagrees', 0))
 
+            cast = mine_agrees + mine_disagrees
+            denominator = tribe_size if tribe_size and tribe_size > 0 else mine_votes
+            if cast <= 0 or denominator <= 0 or (cast / denominator) < MIN_TRIBE_TURNOUT:
+                continue
+
+            rest_agrees = rest_disagrees = rest_votes = 0.0
+            for other_gid in _group_ids(c):
+                if other_gid == str(group_id):
+                    continue
+                rest_votes += _coerce_float(c.get(f'group-{other_gid}-votes', 0))
+                rest_agrees += _coerce_float(c.get(f'group-{other_gid}-agrees', 0))
+                rest_disagrees += _coerce_float(c.get(f'group-{other_gid}-disagrees', 0))
+            if rest_votes <= 0:
+                continue
+
+            mine_pass = max(0.0, mine_votes - mine_agrees - mine_disagrees)
+            rest_pass = max(0.0, rest_votes - rest_agrees - rest_disagrees)
+            counts = {
+                'agree': (mine_agrees, rest_agrees),
+                'disagree': (mine_disagrees, rest_disagrees),
+                'pass': (mine_pass, rest_pass),
+            }
+
+            best_kind = None
+            best_ratio = None
+            best_z = 0.0
+            for kind in ('agree', 'disagree', 'pass'):
+                successes, rest_successes = counts[kind]
+                ratio = _smoothed_ratio(successes, mine_votes, rest_successes, rest_votes)
+                if best_ratio is None or ratio > best_ratio:
+                    best_kind, best_ratio = kind, ratio
+                    best_z = _two_proportion_z(successes, mine_votes, rest_successes, rest_votes)
+            if best_kind is None:
+                continue
+
+            candidates.append({
+                "record": c,
+                "kind": best_kind,
+                # Match the frontend's Math.round(... * 10000) / 10000 gate precision.
+                "ratio": math.floor(best_ratio * 10000 + 0.5) / 10000,
+                "z": best_z,
+                "tribe_agrees": mine_agrees,
+                "mine_disagrees": mine_disagrees,
+                "mine_votes": mine_votes,
+                "rest_agrees": rest_agrees,
+                "rest_votes": rest_votes,
+            })
+
+        candidates.sort(key=lambda item: (-item["ratio"], item["record"].get('comment_id', 0)))
+
+        above_floor = [item for item in candidates if item["ratio"] >= TRIBE_CHARACTERISTIC_RATIO]
+        qualifying = [item for item in above_floor if item["z"] > TRIBE_CHARACTERISTIC_Z]
+
+        if qualifying:
+            selected = qualifying if limit is None else qualifying[:limit]
+            chosen = [(item, True) for item in selected]
+        elif above_floor:
+            chosen = [(above_floor[0], False)]
+        else:
+            chosen = []
+
+        results = []
+        for item, significant in chosen:
+            c = item["record"]
             results.append({
                 "comment_id": c.get('comment_id', c.get('comment-id')),
                 "text": c.get('comment', ''),
-                "distinctiveness_score": round(distinctiveness, 4),
-                "tribe_agree_rate": round(tribe_agree_rate, 4),
-                "overall_agree_rate": round(overall_agree_rate, 4),
-                "tribe_agrees": int(tribe_agrees),
-                "tribe_votes": int(tribe_votes),
-                "overall_votes": int(overall_votes),
+                "distinctiveness_score": item["ratio"],
+                "repness": item["ratio"],
+                "repness_test": round(item["z"], 4),
+                "significant": significant,
+                "repful_for": item["kind"],
+                "tribe_agree_rate": round(item["tribe_agrees"] / item["mine_votes"], 4),
+                "overall_agree_rate": round(item["rest_agrees"] / item["rest_votes"], 4),
+                "tribe_agrees": int(item["tribe_agrees"]),
+                "tribe_disagrees": int(item["mine_disagrees"]),
+                "tribe_votes": int(item["mine_votes"]),
+                "overall_votes": int(item["rest_votes"]),
             })
-
-        results.sort(key=lambda x: x['distinctiveness_score'], reverse=True)
-        return results[:limit]
+        return results
 
     def _build_tribe_payload(self,
                              conversation_data: Dict[str, Any],
                              group_id: int,
                              payload_type: str,
-                             comment_limit: int = 50) -> Dict[str, Any]:
+                             comment_limit: Optional[int] = 50) -> Dict[str, Any]:
         """Build the data payload for tribe_* templates.
 
         Args:
             conversation_data: Full conversation data dict.
             group_id: Participant group ID (0-based).
             payload_type: One of 'title', 'consensus', 'characteristics'.
-            comment_limit: Maximum comments to include per selection list.
+            comment_limit: Maximum comments per selection list. None returns every
+                qualifying characteristic; the consensus path keeps its own cap.
         """
         processed_comments = conversation_data.get('processed_comments', [])
 
@@ -1227,7 +1480,12 @@ class BatchReportGenerator:
 
         # Route by payload_type to select comments and build type-specific keys
         if payload_type == 'consensus':
-            consensus = self._select_comments_for_tribe_consensus(processed_comments, group_id, limit=comment_limit)
+            consensus = self._select_comments_for_tribe_consensus(
+                processed_comments,
+                group_id,
+                limit=comment_limit,
+                tribe_size=participant_sizes.get(group_id, 0),
+            )
             payload["strong_agree_comments"] = consensus["strong_agree"]
             payload["strong_disagree_comments"] = consensus["strong_disagree"]
             representative_records = []
@@ -1244,7 +1502,7 @@ class BatchReportGenerator:
                         representative_records.append(c)
                         break
         elif payload_type == 'characteristics':
-            chars = self._select_comments_for_tribe_characteristics(processed_comments, group_id, limit=comment_limit, math_data=conversation_data.get('math_data'))
+            chars = self._select_comments_for_tribe_characteristics(processed_comments, group_id, limit=comment_limit, math_data=conversation_data.get('math_data'), tribe_size=participant_sizes.get(group_id, 0))
             payload["characteristic_comments"] = chars
             representative_records = []
             for entry in chars:
@@ -1254,8 +1512,8 @@ class BatchReportGenerator:
                         representative_records.append(c)
                         break
         else:
-            # 'title' — use characteristics with smaller limit
-            chars = self._select_comments_for_tribe_characteristics(processed_comments, group_id, limit=comment_limit, math_data=conversation_data.get('math_data'))
+            # 'title' — use the same complete characteristic set as the narrative card
+            chars = self._select_comments_for_tribe_characteristics(processed_comments, group_id, limit=comment_limit, math_data=conversation_data.get('math_data'), tribe_size=participant_sizes.get(group_id, 0))
             payload["characteristic_comments"] = chars
             representative_records = []
             for entry in chars:
@@ -1387,6 +1645,9 @@ class BatchReportGenerator:
         topics = await self.get_topics()
 
         # --- Add participant-group tribe sections ---
+        # Tribe Consensus was deliberately removed from the results page, so new jobs schedule
+        # only the title and characteristics sections. Legacy consensus sections remain supported
+        # by the normalizer and prompt for old reports.
         group_ids = self._get_participant_group_ids(conversation_data)
         logger.info(f"Detected {len(group_ids)} participant groups for tribe sections: {group_ids}")
         for gid in group_ids:
@@ -1394,17 +1655,6 @@ class BatchReportGenerator:
                 "section_type": "tribe_title",
                 "section_name": f"{self.job_id}_tribe_g{gid}_title",
                 "topic_key": f"tribe_g{gid}_title",
-                "name": f"Tribe {gid + 1}",
-                "group_id": gid,
-                "layer_id": None,
-                "cluster_id": None,
-                "citations": [],
-                "sample_comments": [],
-            })
-            topics.append({
-                "section_type": "tribe_consensus",
-                "section_name": f"{self.job_id}_tribe_g{gid}_consensus",
-                "topic_key": f"tribe_g{gid}_consensus",
                 "name": f"Tribe {gid + 1}",
                 "group_id": gid,
                 "layer_id": None,
@@ -1513,7 +1763,7 @@ class BatchReportGenerator:
                     conversation_data,
                     group_id=int(topic.get('group_id', 0)),
                     payload_type='title',
-                    comment_limit=15,
+                    comment_limit=None,
                 )
                 structured_comments = tribe_payload.get('structured_comments', '')
             elif is_tribe_consensus:
@@ -1529,7 +1779,7 @@ class BatchReportGenerator:
                     conversation_data,
                     group_id=int(topic.get('group_id', 0)),
                     payload_type='characteristics',
-                    comment_limit=30,
+                    comment_limit=None,
                 )
                 structured_comments = tribe_payload.get('structured_comments', '')
             else:
@@ -1603,7 +1853,8 @@ class BatchReportGenerator:
                 if is_global_section:
                     total_comments = len(conversation_data["processed_comments"])
                     filter_descriptions = {
-                        "comment_extremity": "comments that divide opinion tribes (high extremity)",
+                        "cross_tribe_gap": "statements where the tribes disagree most (largest gap between the most and least agreeing tribe)",
+                        "comment_extremity": "the most distinctive statements (high extremity)",
                         "group_aware_consensus": "comments with high cross-tribe consensus",
                         "uncertainty_ratio": "comments with high uncertainty/pass rates",
                     }

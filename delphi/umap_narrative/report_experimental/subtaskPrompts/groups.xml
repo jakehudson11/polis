@@ -16,17 +16,17 @@
             the response with ```, your response MUST begin with { and end with }
         </instruction>
         <instruction>
-            SUBSET AWARENESS: You are analyzing a SUBSET of the conversation — only comments that divide opinion tribes (high extremity). The full conversation contains more comments than shown here. Check the conversation_context field in the data section for exact counts. Do NOT claim patterns like "all comments showed X" or "the entire conversation" — you are only seeing filtered comments with high extremity scores.
+            WRITE ABOUT THE FINDINGS, NOT THE METHOD: start directly with the substantive difference between the tribes. Never mention filtering, subsets, thresholds, ranks, comment counts, sample sizes, pass rates, or the analysis process. Never open with "Analysis of..." or refer to "filtered comments". Base every claim on the statements provided and do not invent statements that are not shown.
         </instruction>
         <instruction>
-            TRIBE TERMINOLOGY: Participant groups are called "Tribes". Always write "Tribe 1", "Tribe 2", etc. (1-indexed). Never write "Group 0", "Group 1". The XML data uses zero-indexed element names (tribe-0, tribe-1, etc.) — add 1 when writing tribe names: tribe-0 = Tribe 1, tribe-1 = Tribe 2, and so on.
+            TRIBE TERMINOLOGY: Participant groups are called "Tribes". Each `&lt;tribe-N&gt;` element carries a `label` attribute ("Tribe 1", "Tribe 2"). Use that label. If you refer to element names, remember tribe-0 = Tribe 1, tribe-1 = Tribe 2, and so on. Never write "Group 0", "Group 1".
         </instruction>
         <instruction>
-            CRITICAL DATA VERIFICATION: Before writing ANY claim about how a tribe voted on a statement, you MUST check the actual vote data.
-            - Use the per-tribe vote attributes (tribe-0 agrees, tribe-1 agrees, etc.) to determine each tribe's actual position. Remember tribe-0 = Tribe 1, tribe-1 = Tribe 2.
-            - NEVER claim a tribe disagreed with a statement if the data shows they agreed
-            - NEVER claim a statement divided tribes if all tribes show similar voting patterns
-            - Your narrative must be fully grounded in the actual numbers
+            CRITICAL DATA VERIFICATION: Before writing ANY claim about how a tribe voted on a statement, check the per-tribe agrees/disagrees counts.
+            - If disagrees > agrees, the tribe rejects the statement; if agrees > disagrees, the tribe supports it.
+            - If agrees and disagrees are equal, or passes dominate, describe the tribe as split or uncertain — do not assign a clear position.
+            - NEVER reverse a tribe's position, and never claim a statement divided tribes if all tribes show similar voting patterns.
+            - Your narrative must be fully grounded in the actual numbers.
         </instruction>
     </criticalInstructions>
 
@@ -34,14 +34,10 @@
         <term name="group_differences">
             <description>Notable difference in views between tribes, especially comments where tribes
                 disagreed significantly</description>
-            <threshold>30</threshold>
-            <unit>percent</unit>
         </term>
         <term name="extreme_differences">
             <description>Very large difference in views between tribes (typically where one
                 tribe strongly agrees and another strongly disagrees)</description>
-            <threshold>60</threshold>
-            <unit>percent</unit>
         </term>
     </definitions>
 
@@ -95,9 +91,9 @@
                     </instruction>
                 </criticalInstructions>
                 <format>
-                    Analysis of voting patterns revealed [number_of_groups] distinct tribes with
-                    different perspectives on key issues. These tribes were primarily defined by
-                    their positions on [key_division_theme], particularly regarding [specific_aspect].
+                    The conversation contains [number_of_groups] distinct tribes with different
+                    perspectives on key issues. These tribes were primarily defined by their
+                    positions on [key_division_theme], particularly regarding [specific_aspect].
                     [Additional_high_level_context].
 
                     The most significant divisions between tribes emerged around
@@ -271,7 +267,7 @@
         {
         "clauses": [
         {
-        "text": "Analysis of voting patterns revealed 3 distinct tribes with different perspectives on key issues.",
+        "text": "The conversation contains 3 distinct tribes with different perspectives on key issues.",
         "citations": [12, 15, 23]
         }
         ]

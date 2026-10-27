@@ -15,6 +15,33 @@ from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
+
+def _coerce_int(value, default=None):
+    """Best-effort integer coercion for JSON payloads that may use strings."""
+    if value is None or isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_number(value, default: float = 0.0) -> float:
+    """Coerce a possibly-string, possibly-Decimal numeric field."""
+    if value is None or isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 class GroupDataProcessor:
     """
     Processes group and vote data for report generation.
@@ -199,121 +226,221 @@ class GroupDataProcessor:
                 'n_groups': 0
             }
     
-    def get_vote_data_by_groups(self, zid: int) -> Dict[str, Any]:
+    def _extract_group_assignments(self, math_data: Optional[Dict[str, Any]]) -> Dict[str, int]:
+        """Return {participant id (str): group id} from a Pol.is math payload.
+
+        `group-clusters[].members` holds BASE-cluster ids. The participants in each
+        base cluster live in `base-clusters.members`, and the frontend resolves them
+        the same way. Treating the base ids as participant ids only works when every
+        base cluster contains one person, which is not true for normal conversations.
+        """
+        if not isinstance(math_data, dict):
+            return {}
+
+        for key in ('group_assignments', 'group_assignment', 'groupAssignments'):
+            assignments = math_data.get(key)
+            if isinstance(assignments, dict) and assignments:
+                resolved = {}
+                for pid, gid in assignments.items():
+                    group_id = _coerce_int(gid)
+                    if group_id is not None:
+                        resolved[str(pid)] = group_id
+                if resolved:
+                    return resolved
+
+        participation = math_data.get('participation')
+        if isinstance(participation, dict):
+            ptptogroup = participation.get('ptptogroup')
+            if isinstance(ptptogroup, dict) and ptptogroup:
+                resolved = {}
+                for pid, gid in ptptogroup.items():
+                    group_id = _coerce_int(gid)
+                    if group_id is not None:
+                        resolved[str(pid)] = group_id
+                if resolved:
+                    return resolved
+
+        base_members: Dict[int, List[Any]] = {}
+        base_clusters = math_data.get('base-clusters')
+        if isinstance(base_clusters, dict):
+            base_ids = base_clusters.get('id') or []
+            member_lists = base_clusters.get('members') or []
+            if isinstance(base_ids, list) and isinstance(member_lists, list):
+                for index, base_id in enumerate(base_ids):
+                    if index >= len(member_lists):
+                        continue
+                    base_id_int = _coerce_int(base_id)
+                    members = member_lists[index]
+                    if base_id_int is not None and isinstance(members, list):
+                        base_members[base_id_int] = members
+
+        assignments: Dict[str, int] = {}
+        group_clusters = math_data.get('group-clusters')
+        if isinstance(group_clusters, list):
+            for position, cluster in enumerate(group_clusters):
+                if isinstance(cluster, dict):
+                    gid = _coerce_int(cluster.get('id'))
+                    if gid is None:
+                        gid = position
+                    members = cluster.get('members')
+                    if not isinstance(members, list):
+                        members = next(
+                            (
+                                cluster.get(candidate)
+                                for candidate in ('ids', 'pids', 'participants')
+                                if isinstance(cluster.get(candidate), list)
+                            ),
+                            [],
+                        )
+                elif isinstance(cluster, list):
+                    gid = position
+                    members = cluster
+                else:
+                    continue
+
+                for member in members:
+                    member_id = _coerce_int(member)
+                    if member_id is None:
+                        continue
+                    if base_members:
+                        # Base-cluster id -> its participants. A payload that lists
+                        # participant ids directly falls through to [member_id].
+                        for pid in base_members.get(member_id, [member_id]):
+                            pid_int = _coerce_int(pid)
+                            if pid_int is not None:
+                                assignments[str(pid_int)] = gid
+                    else:
+                        assignments[str(member_id)] = gid
+
+        if not assignments:
+            group_stats = math_data.get('group-stats')
+            if isinstance(group_stats, dict):
+                for key, value in group_stats.items():
+                    if not (isinstance(key, str) and key.startswith('group_')):
+                        continue
+                    gid = _coerce_int(key.replace('group_', ''))
+                    members = value.get('members') if isinstance(value, dict) else None
+                    if gid is None or not isinstance(members, list):
+                        continue
+                    for pid in members:
+                        pid_int = _coerce_int(pid)
+                        if pid_int is not None:
+                            assignments[str(pid_int)] = gid
+
+        if assignments:
+            logger.info(f"Resolved {len(assignments)} participant group assignments from math data")
+        else:
+            logger.warning("No group assignments found in math data, generating synthetic groups based on voting patterns")
+        return assignments
+
+    def _vote_data_from_snapshot(
+        self,
+        zid: int,
+        math_data: Dict[str, Any],
+        group_votes: Dict[str, Any],
+        group_assignments: Dict[str, int],
+    ) -> Dict[str, Any]:
+        """Build vote data from the stored snapshot's per-tribe `group-votes`.
+
+        These are the counts the Survey > Results cards render, so the narrative's
+        cross-tribe gaps cannot drift from the page when Pol.is re-ticks.
+        """
+        vote_data: Dict[int, Dict[str, Any]] = {}
+        group_ids = set()
+
+        for group_key, group_value in group_votes.items():
+            gid = _coerce_int(group_key)
+            if gid is None or not isinstance(group_value, dict):
+                continue
+            votes = group_value.get('votes')
+            if not isinstance(votes, dict):
+                continue
+            group_ids.add(gid)
+
+            for tid_key, entry in votes.items():
+                tid = _coerce_int(tid_key)
+                if tid is None or not isinstance(entry, dict):
+                    continue
+                agrees = _as_number(entry.get('A'))
+                disagrees = _as_number(entry.get('D'))
+                total = _as_number(entry.get('S'), agrees + disagrees)
+                if total < agrees + disagrees:
+                    total = agrees + disagrees
+                passes = max(0.0, total - agrees - disagrees)
+
+                record = vote_data.get(tid)
+                if record is None:
+                    record = {
+                        'total_votes': 0,
+                        'total_agrees': 0,
+                        'total_disagrees': 0,
+                        'total_passes': 0,
+                        'groups': {},
+                    }
+                    vote_data[tid] = record
+
+                record['total_votes'] += int(round(total))
+                record['total_agrees'] += int(round(agrees))
+                record['total_disagrees'] += int(round(disagrees))
+                record['total_passes'] += int(round(passes))
+
+                if gid != -1:
+                    record['groups'][gid] = {
+                        'votes': int(round(total)),
+                        'agrees': int(round(agrees)),
+                        'disagrees': int(round(disagrees)),
+                        'passes': int(round(passes)),
+                    }
+
+        tids = math_data.get('tids') or []
+        extremity = (math_data.get('pca') or {}).get('comment-extremity') or []
+        consensus = math_data.get('group-aware-consensus') or {}
+        extremity_by_tid: Dict[int, float] = {}
+        if isinstance(tids, list) and isinstance(extremity, list):
+            for index, tid in enumerate(tids):
+                if index >= len(extremity):
+                    break
+                tid_int = _coerce_int(tid)
+                if tid_int is not None:
+                    extremity_by_tid[tid_int] = _as_number(extremity[index])
+
+        for tid, record in vote_data.items():
+            record['comment_extremity'] = extremity_by_tid.get(tid, 0.0)
+            if isinstance(consensus, dict) and str(tid) in consensus:
+                record['group_aware_consensus'] = _as_number(consensus.get(str(tid)))
+            else:
+                record['group_aware_consensus'] = 0.0
+            record['num_groups'] = len(record['groups'])
+
+        return {
+            'vote_data': vote_data,
+            'group_assignments': group_assignments,
+            'n_groups': len([gid for gid in group_ids if gid != -1]),
+        }
+
+    def get_vote_data_by_groups(self, zid: int, math_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Get vote data organized by groups for reporting.
-        
+
         Args:
             zid: Conversation ID
-            
+            math_data: Optional math payload (usually the stored Agora snapshot).
+                When it carries `group-votes`, those counts are used directly so
+                the report matches the page. Without it, live votes + live
+                math_main are used as before.
+
         Returns:
             Dictionary with vote data organized by comment and group
         """
         try:
             # Get math data for group assignments
-            math_data = self.get_math_main_by_conversation(zid)
-            
-            # Try various possible formats for group assignments
-            group_assignments = {}
-            
-            # Check the most common keys where group assignments might be stored
-            possible_keys = ['group_assignments', 'group_assignment', 'groupAssignments']
-            for key in possible_keys:
-                if key in math_data and math_data[key]:
-                    group_assignments = math_data[key]
-                    logger.info(f"Found group assignments under key: {key}")
-                    break
-            
-            # Check for ptogroup in the participation section
-            if not group_assignments and isinstance(math_data, dict) and 'participation' in math_data:
-                participation = math_data['participation']
-                if isinstance(participation, dict) and 'ptptogroup' in participation:
-                    ptptogroup = participation['ptptogroup']
-                    if ptptogroup:
-                        group_assignments = ptptogroup
-                        logger.info(f"Found group assignments in participation.ptptogroup")
-                        
-            # Check for group-clusters which has group membership information
-            if not group_assignments and isinstance(math_data, dict) and 'group-clusters' in math_data:
-                group_clusters = math_data['group-clusters']
-                if isinstance(group_clusters, list) and len(group_clusters) > 0:
-                    try:
-                        # Group clusters may contain membership info
-                        logger.debug(f"Group-clusters list has {len(group_clusters)} items")
-                        
-                        # The data might be in various formats depending on the algorithm used
-                        # Let's log some debug info to see the structure
-                        if len(group_clusters) > 0:
-                            first_cluster = group_clusters[0]
-                            logger.debug(f"First cluster type: {type(first_cluster)}")
-                            
-                            # Check if it's a list of lists (direct group memberships)
-                            if isinstance(first_cluster, list) and len(first_cluster) > 0:
-                                # This may be a list of group IDs
-                                # Let's try to generate group assignments
-                                temp_assignments = {}
-                                
-                                # Interpret group-clusters as a list of groups, with each entry being a list of participant IDs
-                                for group_id, group_members in enumerate(group_clusters):
-                                    if isinstance(group_members, list):
-                                        for pid in group_members:
-                                            temp_assignments[str(pid)] = group_id
-                                            
-                                if temp_assignments:
-                                    group_assignments = temp_assignments
-                                    logger.info(f"Extracted {len(group_assignments)} group assignments from group-clusters list")
-                            
-                            # Check if it's a list of dictionaries (more complex structure)
-                            elif isinstance(first_cluster, dict):
-                                logger.debug(f"First cluster keys: {list(first_cluster.keys()) if first_cluster else 'empty'}")
-                                
-                                # Try to extract members if available
-                                temp_assignments = {}
-                                
-                                for group_id, cluster_info in enumerate(group_clusters):
-                                    if isinstance(cluster_info, dict):
-                                        # Check various possible keys for member information
-                                        for key in ['members', 'ids', 'pids', 'participants']:
-                                            if key in cluster_info and isinstance(cluster_info[key], list):
-                                                for pid in cluster_info[key]:
-                                                    temp_assignments[str(pid)] = group_id
-                                
-                                if temp_assignments:
-                                    group_assignments = temp_assignments
-                                    logger.debug(f"Extracted {len(group_assignments)} group assignments from group-clusters dictionaries")
-                            
-                    except Exception as e:
-                        logger.error(f"Error extracting group assignments from group-clusters: {e}")
-                        import traceback
-                        logger.error(traceback.format_exc())
-            
-            # Last resort - check if there's a 'group-stats' that might have participant info
-            if not group_assignments and isinstance(math_data, dict) and 'group-stats' in math_data:
-                group_stats = math_data['group-stats']
-                if isinstance(group_stats, dict) and len(group_stats) > 0:
-                    # Try to extract participant group assignments from group stats
-                    # This is just a basic approach - might need refinement 
-                    try:
-                        # Usually there are group_X keys with participant data
-                        # We'll look for these and try to extract participant groups
-                        temp_assignments = {}
-                        for key, value in group_stats.items():
-                            if key.startswith('group_') and isinstance(value, dict) and 'members' in value:
-                                group_id = key.replace('group_', '')
-                                for pid in value['members']:
-                                    temp_assignments[str(pid)] = int(group_id)
-                        
-                        if temp_assignments:
-                            group_assignments = temp_assignments
-                            logger.info(f"Extracted {len(group_assignments)} group assignments from group-stats")
-                    except Exception as e:
-                        logger.error(f"Error extracting group assignments from group-stats: {e}")
-                        
-            # If no group assignments found anywhere, generate them
-            if not group_assignments:
-                logger.warning("No group assignments found in math data, generating synthetic groups based on voting patterns")
-                    
-            logger.debug(f"Found {len(group_assignments)} group assignments in math data")
+            math_data = math_data or self.get_math_main_by_conversation(zid)
+            group_assignments = self._extract_group_assignments(math_data)
+
+            group_votes = math_data.get('group-votes') if isinstance(math_data, dict) else None
+            if isinstance(group_votes, dict) and group_votes:
+                return self._vote_data_from_snapshot(zid, math_data, group_votes, group_assignments)
+
             
             # Get all votes
             votes = self.postgres_client.get_votes_by_conversation(zid)
@@ -638,25 +765,32 @@ class GroupDataProcessor:
             logger.error(f"Error retrieving extremity values: {str(e)}")
             return {}
             
-    def get_export_data(self, zid: int, include_moderation: bool) -> Dict[str, Any]:
+    def get_export_data(self, zid: int, include_moderation: bool, math_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Get vote and comment data in the export format expected by the report generator.
         This simulates the format of the data from the export endpoint.
-        
+
         Args:
             zid: Conversation ID
-            
+            include_moderation: Whether to include moderated comments
+            math_data: Optional math payload (usually the stored Agora snapshot).
+                When provided, per-tribe vote counts and assignments come from it
+                so the report matches what the results page displays.
+
         Returns:
             Dictionary with comment and vote data in export format
         """
         try:
             # Get group and vote data
-            group_vote_data = self.get_vote_data_by_groups(zid)
+            group_vote_data = self.get_vote_data_by_groups(zid, math_data=math_data)
             vote_data = group_vote_data['vote_data']
             group_assignments = group_vote_data['group_assignments']
             
             # Get comments
             comments = self.postgres_client.get_comments_by_conversation(zid)
+            # Defensive: a removed statement stays in the maths but must never be described in a
+            # narrative, or the report cites a statement participants can no longer see.
+            comments = [comment for comment in comments if comment.get('active', True)]
             if include_moderation:
                 comments = [comment for comment in comments if comment['mod'] > -1]
             

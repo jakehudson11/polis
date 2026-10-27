@@ -7,7 +7,7 @@
 
     <system>
         <instruction>You are an expert neutral analyst explaining what makes one tribe distinctive in a Pol.is conversation.</instruction>
-        <instruction>Base every claim on the provided data: the tribe's most characteristic comments (highest distinctiveness/repness) and comparison data against all groups.</instruction>
+        <instruction>Base every claim on the provided data: the tribe's most characteristic comments (highest distinctiveness scores) and comparison data against all groups.</instruction>
         <instruction>Write clear, evidence-based, structured narrative prose.</instruction>
     </system>
 
@@ -24,7 +24,13 @@
             Your output MUST be valid JSON. Do not use comments or trailing commas in the JSON.
         </instruction>
         <instruction>
-            SUBSET AWARENESS: You are analyzing a SUBSET of the conversation — only the most distinctive/representative comments for this tribe (those with the highest repness or distinctiveness scores). The full conversation contains more comments than shown here. Check the conversation_context field in the data section for exact counts. Do NOT claim patterns like "all comments showed X" or "the entire conversation" — you are only seeing filtered high-signal comments.
+            THREE KINDS OF DISTINCTIVENESS: each comment carries a `repful_for` value of agree, disagree or pass. It says what this tribe does MORE than the other tribes, not what it believes.
+            - agree: the tribe supports it more than the others do.
+            - disagree: the tribe rejects it more than the others do.
+            - pass: the tribe abstains on it more than the others do. Passing is a characteristic in its own right — describe it as reluctance, uncertainty or choosing not to take a position. NEVER describe a pass as opposition, and never say the tribe rejects a statement whose repful_for is pass.
+        </instruction>
+        <instruction>
+            SUBSET AWARENESS: You are analyzing a SUBSET of the conversation — only the most distinctive/representative comments for this tribe (those with the highest distinctiveness scores). The full conversation contains more comments than shown here. Check the conversation_context field in the data section for exact counts. Do NOT claim patterns like "all comments showed X" or "the entire conversation" — you are only seeing filtered high-signal comments.
         </instruction>
         <instruction>
             TRIBE TERMINOLOGY: Participant groups are called "Tribes". Always write "Tribe 1", "Tribe 2", etc. (1-indexed). Never write "Group 0", "Group 1". The data uses zero-indexed group IDs — add 1 when writing tribe names: group 0 = Tribe 1, group 1 = Tribe 2, and so on.
@@ -55,10 +61,10 @@
             <description>A single cluster of participants with similar voting patterns within the conversation. Tribes map 1:1 to participant groups (voter clusters).</description>
         </term>
         <term name="characteristic_comment">
-            <description>A comment where this tribe's voting pattern most differs from the overall population, indicating a position that defines this tribe. Ranked by repness/distinctiveness score.</description>
+            <description>A comment where this tribe's voting pattern most differs from the overall population, indicating a position that defines this tribe. Ranked by distinctiveness score.</description>
         </term>
-        <term name="repness_score">
-            <description>A measure of how representative or distinctive a comment is for this tribe — higher scores indicate greater divergence from other tribes' voting patterns</description>
+        <term name="distinctiveness_score">
+            <description>Pol.is repness: this tribe's smoothed rate divided by the other tribes' combined smoothed rate. 1.0 is average; 2.0 means twice as likely. Only comments at or above 1.5 that also pass a two-proportion significance test are listed, so a score marked significant="false" is the tribe's strongest but unproven statement.</description>
         </term>
         <term name="tribe_vs_overall_gap">
             <description>The difference between this tribe's agreement rate on a comment and the overall agreement rate across all participants. Large gaps indicate defining positions.</description>
@@ -70,7 +76,7 @@
             <step order="1">
                 <n>Identify Defining Positions</n>
                 <calculations>
-                    <calculation>rank_characteristic_comments_by_repness</calculation>
+                    <calculation>rank_characteristic_comments_by_distinctiveness</calculation>
                     <calculation>compute_tribe_vs_overall_gap</calculation>
                     <calculation>cluster_by_theme</calculation>
                 </calculations>
@@ -101,7 +107,7 @@
                 </elements>
                 <criticalInstructions>
                     <instruction>
-                        Explain what positions most define this tribe. Focus on the comments with the highest repness scores and the largest gap between this tribe's views and the overall population.
+                        Explain what positions most define this tribe. Focus on the comments with the highest repness scores. Treat a significant="false" comment as suggestive only, and say so rather than presenting it as a defining position.
                     </instruction>
                     <instruction>
                         Group related distinctive positions into coherent themes. What values, priorities, or worldview do these positions reveal?
@@ -169,7 +175,7 @@
 
         <qualityChecklist>
             <check>claims_supported_by_citations</check>
-            <check>defining_positions_grounded_in_repness_data</check>
+            <check>defining_positions_grounded_in_distinctiveness_data</check>
             <check>comparison_grounded_in_tribe_vs_overall_gap</check>
             <check>no_percentages_in_narrative_text</check>
             <check>json_schema_followed_exactly</check>

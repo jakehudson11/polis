@@ -723,9 +723,11 @@ def _backfill_topic_summaries(
 
             prompt = (
                 "You are writing short summaries of discussion topics for a deliberation platform.\n"
-                "For each cluster below, write a 1-2 sentence \"in a nutshell\" summary of the topic "
-                "based on the sample comments. The summary MUST NOT restate the topic label verbatim, "
-                "must be plain prose, and must NOT include citations or percentages.\n\n"
+                "For each cluster below, write a 1-2 sentence \"in a nutshell\" summary of what the "
+                "topic is about, based on the sample comments. The summary MUST NOT restate the topic "
+                "label verbatim, must be plain prose, must describe the subject matter and what is at "
+                "stake rather than how any group or tribe voted, and must NOT include citations, "
+                "percentages or vote counts.\n\n"
                 + "\n".join(cluster_specs)
                 + "\n\nRespond with ONLY a JSON object of the form "
                 '{"<cluster_id>": "<summary>", ...}'

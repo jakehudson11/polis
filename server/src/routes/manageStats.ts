@@ -66,6 +66,7 @@ type ParticipationRow = {
   email: string | null;
   votes: string | number;
   comments: string | number;
+  moderated: string | number;
 };
 
 function asArray<T>(value: unknown): T[] {
@@ -113,11 +114,16 @@ export async function handle_GET_conversationSummary(
       await pg.queryP_readOnly(
       `WITH vote_stats AS (
          SELECT
-           COUNT(DISTINCT pid)::int AS participants_voted,
+          COUNT(DISTINCT v.pid)::int AS participants_voted,
            COUNT(*)::int AS total_votes
-         FROM votes_latest_unique
-         WHERE zid = ($1)
-       ),
+        FROM votes_latest_unique v
+        JOIN comments c
+          ON c.zid = v.zid
+         AND c.tid = v.tid
+        WHERE v.zid = ($1)
+          AND c.active = true
+          AND c.mod != -1
+      ),
        comment_stats AS (
          SELECT
            COUNT(DISTINCT pid)::int AS commenters,
@@ -204,10 +210,15 @@ export async function handle_GET_participationStats(
     const totalRows = asArray<TotalRow>(
       await pg.queryP_readOnly(
       `WITH vote_counts AS (
-         SELECT pid, COUNT(*)::int AS votes
-         FROM votes_latest_unique
-         WHERE zid = ($1)
-         GROUP BY pid
+         SELECT v.pid, COUNT(*)::int AS votes
+         FROM votes_latest_unique v
+         JOIN comments c
+           ON c.zid = v.zid
+          AND c.tid = v.tid
+         WHERE v.zid = ($1)
+           AND c.active = true
+           AND c.mod != -1
+         GROUP BY v.pid
        ),
        comment_counts AS (
          SELECT pid, COUNT(*)::int AS comments
@@ -257,10 +268,15 @@ export async function handle_GET_participationStats(
          SELECT owner FROM conversations WHERE zid = ($1)
        ),
        vote_counts AS (
-         SELECT pid, COUNT(*)::int AS votes
-         FROM votes_latest_unique
-         WHERE zid = ($1)
-         GROUP BY pid
+         SELECT v.pid, COUNT(*)::int AS votes
+         FROM votes_latest_unique v
+         JOIN comments c
+           ON c.zid = v.zid
+          AND c.tid = v.tid
+         WHERE v.zid = ($1)
+           AND c.active = true
+           AND c.mod != -1
+         GROUP BY v.pid
        ),
        comment_counts AS (
          SELECT pid, COUNT(*)::int AS comments
@@ -271,14 +287,27 @@ export async function handle_GET_participationStats(
            AND COALESCE(is_seed, false) = false
          GROUP BY pid
        ),
+       -- Statements a moderator has acted on: rejected (mod = -1) or
+       -- deactivated/removed (active = false with mod > 0). Statements still
+       -- waiting for review (mod = 0, active = false) are NOT moderated yet.
+       moderated_counts AS (
+         SELECT pid, COUNT(*)::int AS moderated
+         FROM comments
+         WHERE zid = ($1)
+           AND COALESCE(is_seed, false) = false
+           AND (mod = -1 OR (active = false AND mod > 0))
+         GROUP BY pid
+       ),
        participant_stats AS (
          SELECT
            p.pid,
            COALESCE(v.votes, 0)::int AS votes,
-           COALESCE(c.comments, 0)::int AS comments
+           COALESCE(c.comments, 0)::int AS comments,
+           COALESCE(m.moderated, 0)::int AS moderated
          FROM participants p
          LEFT JOIN vote_counts v ON v.pid = p.pid
          LEFT JOIN comment_counts c ON c.pid = p.pid
+         LEFT JOIN moderated_counts m ON m.pid = p.pid
          WHERE p.zid = ($1)
        )
        SELECT
@@ -286,7 +315,8 @@ export async function handle_GET_participationStats(
          x.xid,
          u.email,
          ps.votes,
-         ps.comments
+         ps.comments,
+         ps.moderated
        FROM participant_stats ps
        LEFT JOIN participants p
          ON p.zid = ($1) AND p.pid = ps.pid
@@ -322,6 +352,7 @@ export async function handle_GET_participationStats(
         email: row.email ?? null,
         votes: Number(row.votes) || 0,
         comments: Number(row.comments) || 0,
+        moderated: Number(row.moderated) || 0,
       })),
       pagination: {
         limit: paginationMeta.limit,
