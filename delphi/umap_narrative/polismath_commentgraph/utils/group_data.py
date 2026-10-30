@@ -60,6 +60,30 @@ class GroupDataProcessor:
         self.dynamodb = None
         self.extremity_table = None
         self.init_dynamodb()
+
+    @staticmethod
+    def select_comments_by_statement_ids(
+        comments: List[Dict[str, Any]],
+        statement_ids: List[Any],
+    ) -> List[Dict[str, Any]]:
+        """Return only selected comments, preserving the canonical ID order."""
+        comments_by_id = {}
+        for comment in comments:
+            comment_id = comment.get('comment_id', comment.get('comment-id'))
+            if comment_id is not None:
+                comments_by_id.setdefault(str(comment_id), comment)
+
+        selected = []
+        seen_ids = set()
+        for statement_id in statement_ids:
+            key = str(statement_id)
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            comment = comments_by_id.get(key)
+            if comment is not None:
+                selected.append(comment)
+        return selected
         
     def init_dynamodb(self):
         """Initialize DynamoDB connection for storing extremity values."""

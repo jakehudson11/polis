@@ -12,11 +12,13 @@ from polismath_commentgraph.utils.group_data import GroupDataProcessor
 
 try:  # `umap_narrative` is importable in the container (/app on PYTHONPATH)
     from umap_narrative.agora_math_snapshot import (
+        fetch_agora_report_inputs,
         fetch_agora_math_snapshot,
         resolve_agora_deliberation_id,
     )
 except ImportError:  # pragma: no cover - direct module path when running from umap_narrative/
     from agora_math_snapshot import (  # type: ignore
+        fetch_agora_report_inputs,
         fetch_agora_math_snapshot,
         resolve_agora_deliberation_id,
     )
@@ -126,6 +128,21 @@ def test_export_data_uses_snapshot_counts_and_still_drops_removed_comments():
     }
 
 
+def test_canonical_consensus_comments_keep_only_selected_ids_and_order():
+    comments = [
+        {"comment_id": 1, "comment": "first"},
+        {"comment-id": "2", "comment": "second"},
+        {"comment_id": 3, "comment": "third"},
+    ]
+
+    selected = GroupDataProcessor.select_comments_by_statement_ids(
+        comments,
+        ["3", 1, 3, 99],
+    )
+
+    assert [comment["comment"] for comment in selected] == ["third", "first"]
+
+
 class _FakeResponse:
     def __init__(self, status_code, payload=None):
         self.status_code = status_code
@@ -155,6 +172,95 @@ def test_fetch_snapshot_uses_internal_key_and_returns_math(monkeypatch):
     )
     assert captured["headers"] == {"x-polis-internal-key": "secret"}
     assert captured["timeout"] == 5
+
+
+def test_fetch_report_inputs_returns_agora_canonical_consensus_sets(monkeypatch):
+    selection = {
+        "groupCount": 2,
+        "baseThreshold": 0.7,
+        "smallSampleAdjusted": False,
+        "agreement": [{"tid": 1, "score": 0.8}],
+        "disagreement": [{"tid": 3, "score": 0.76}],
+    }
+    monkeypatch.setenv("AGORA_BACKEND_URL", "http://agora-backend:3000")
+    monkeypatch.setenv("POLIS_INTERNAL_PROXY_SECRET", "secret")
+    monkeypatch.setattr(
+        "umap_narrative.agora_math_snapshot.requests.get",
+        lambda *args, **kwargs: _FakeResponse(
+            200,
+            {"math_pca2": SNAPSHOT, "group_consensus_statements": selection},
+        ),
+    )
+
+    assert fetch_agora_report_inputs("mux33xlpd6p2dev") == {
+        "math_pca2": SNAPSHOT,
+        "group_consensus_statements": selection,
+        "group_division_statements": None,
+        "uncertainty_statements": None,
+    }
+
+
+def test_fetch_report_inputs_returns_agora_mixed_view_statements(monkeypatch):
+    divisions = [
+        {
+            "tid": 3,
+            "score": 0.82,
+            "totalAgree": 41,
+            "totalDisagree": 32,
+            "totalPass": 4,
+            "totalShown": 77,
+            "totalCast": 73,
+            "totalParticipants": 100,
+            "passRate": 4 / 77,
+        }
+    ]
+    monkeypatch.setenv("AGORA_BACKEND_URL", "http://agora-backend:3000")
+    monkeypatch.setenv("POLIS_INTERNAL_PROXY_SECRET", "secret")
+    monkeypatch.setattr(
+        "umap_narrative.agora_math_snapshot.requests.get",
+        lambda *args, **kwargs: _FakeResponse(
+            200,
+            {"math_pca2": SNAPSHOT, "group_division_statements": divisions},
+        ),
+    )
+
+    assert fetch_agora_report_inputs("mux33xlpd6p2dev") == {
+        "math_pca2": SNAPSHOT,
+        "group_consensus_statements": None,
+        "group_division_statements": divisions,
+        "uncertainty_statements": None,
+    }
+
+
+def test_fetch_report_inputs_returns_agora_uncertainty_statements(monkeypatch):
+    uncertainty = [
+        {
+            "tid": 4,
+            "spread": 0.5,
+            "totalPass": 20,
+            "totalSeen": 40,
+            "tribes": [
+                {"id": 0, "pass": 10, "seen": 20, "passShare": 0.5},
+                {"id": 1, "pass": 10, "seen": 20, "passShare": 0.5},
+            ],
+        }
+    ]
+    monkeypatch.setenv("AGORA_BACKEND_URL", "http://agora-backend:3000")
+    monkeypatch.setenv("POLIS_INTERNAL_PROXY_SECRET", "secret")
+    monkeypatch.setattr(
+        "umap_narrative.agora_math_snapshot.requests.get",
+        lambda *args, **kwargs: _FakeResponse(
+            200,
+            {"math_pca2": SNAPSHOT, "uncertainty_statements": uncertainty},
+        ),
+    )
+
+    assert fetch_agora_report_inputs("mux33xlpd6p2dev") == {
+        "math_pca2": SNAPSHOT,
+        "group_consensus_statements": None,
+        "group_division_statements": None,
+        "uncertainty_statements": uncertainty,
+    }
 
 
 def test_fetch_snapshot_returns_none_without_configuration(monkeypatch):
@@ -219,7 +325,10 @@ def test_report_batch_passes_the_snapshot_into_the_export():
     with open(script, encoding="utf-8") as handle:
         source = handle.read()
 
-    assert "fetch_agora_math_snapshot" in source
+    assert "fetch_agora_report_inputs" in source
     assert "resolve_agora_deliberation_id" in source
     assert "math_data=math_data" in source
     assert "self._get_stored_math_snapshot()" in source
+    assert "agora_selected_group_consensus" in source
+    assert "is_canonical_selection" in source
+    assert "select_comments_by_statement_ids" in source

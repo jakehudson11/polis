@@ -88,7 +88,7 @@ def test_get_export_data_drops_removed_comments_even_if_the_client_returns_them(
     assert [row["comment-id"] for row in export["comments"]] == [3]
 
 
-def test_tribe_consensus_prompt_uses_the_same_bar_both_ways():
+def test_tribe_consensus_prompt_uses_the_80_percent_bar_both_ways():
     tree = ET.parse(os.path.join(PROMPT_DIR, "tribe_consensus.xml"))
     thresholds = [
         term.findtext("threshold")
@@ -96,7 +96,18 @@ def test_tribe_consensus_prompt_uses_the_same_bar_both_ways():
         if term.get("name") in {"strong_agreement", "strong_disagreement"}
     ]
 
-    assert thresholds == ["60", "60"]
+    assert thresholds == ["80", "80"]
+
+
+def test_tribe_title_and_insight_prompts_prioritize_defining_statements():
+    for filename in ("tribe_title.xml", "tribe_characteristics.xml"):
+        with open(os.path.join(PROMPT_DIR, filename), encoding="utf-8") as handle:
+            prompt = handle.read()
+
+        assert "characteristic_comments" in prompt
+        assert "primary evidence" in prompt
+        assert "consensus_context" in prompt
+        assert "complementary context" in prompt
 
 
 def test_topic_prompt_describes_the_subject_rather_than_the_groups():
@@ -109,24 +120,58 @@ def test_topic_prompt_describes_the_subject_rather_than_the_groups():
     assert "DO NOT compare opinion groups" in prompt
 
 
-def test_groups_prompt_describes_the_cross_tribe_gap_not_extremity():
+def test_groups_prompt_describes_mixed_views_not_extremity_or_a_tribe_gap():
     with open(os.path.join(PROMPT_DIR, "groups.xml"), encoding="utf-8") as handle:
         prompt = handle.read()
 
     assert "comments that divide opinion tribes (high extremity)" not in prompt
     assert "most distinctive statements (high extremity)" not in prompt
-    assert "gap between the most and least agreeing tribe" in prompt
+    assert "gap between the most and least agreeing tribe" not in prompt
+    assert "pooled agree/disagree split" in prompt
+    assert "DO NOT INVENT CAMPS" in prompt
+    assert "group_division_statements_json" in prompt
 
 
-def test_group_divisions_section_uses_the_cross_tribe_gap():
-    """The narrative must select statements the same way the UI card does."""
+def test_group_divisions_section_uses_agora_mixed_view_statements():
+    """The narrative must report exactly the statements the UI card shows."""
     with open(BATCH_SCRIPT, encoding="utf-8") as handle:
         source = handle.read()
 
     assert '"name": "groups"' in source
-    assert '"filter_type": "cross_tribe_gap"' in source
+    assert 'agora_selected_group_divisions' in source
+    assert 'CANONICAL_SELECTION_FILTERS' in source
+    # A supplied empty selection means the page shows no card, so the section is skipped rather
+    # than re-filtered independently.
+    assert 'has_group_division_selection = isinstance(self.group_division_selection, list)' in source
+    assert "Skipping Group Divisions narrative: Agora selected no statements" in source
+    # Legacy snapshots without Agora's selection still fall back to the old gap filter.
     assert 'elif filter_type == "cross_tribe_gap":' in source
-    assert "disagree_threshold: float = 0.6" in source
+    assert '"filter_threshold": MIN_POLARISATION_GAP' in source
+
+
+def test_uncertainty_section_uses_agora_points_of_uncertainty_statements():
+    """The narrative must report exactly the statements the Points of Uncertainty card shows."""
+    with open(BATCH_SCRIPT, encoding="utf-8") as handle:
+        source = handle.read()
+
+    assert '"name": "uncertainty"' in source
+    assert 'agora_selected_uncertainty' in source
+    assert "uncertainty_statements_json" in source
+    assert 'has_uncertainty_selection = isinstance(self.uncertainty_selection, list)' in source
+    assert "Skipping Points of Uncertainty narrative: Agora selected no statements" in source
+    # Legacy snapshots without Agora's selection still fall back to the pass-rate filter.
+    assert 'elif filter_type == "uncertainty_ratio":' in source
+    assert '"filter_threshold": UNCERTAINTY_PASS_RATE' in source
+
+
+def test_uncertainty_prompt_uses_the_canonical_agora_selection():
+    with open(os.path.join(PROMPT_DIR, "uncertainty.xml"), encoding="utf-8") as handle:
+        prompt = handle.read()
+
+    assert "CANONICAL AGORA SELECTION" in prompt
+    assert "uncertainty_statements_json" in prompt
+    assert "Do not independently filter, rank, replace, add, or drop statements" in prompt
+
 
 def test_tribe_characteristics_use_repness_with_a_significance_gate():
     """Repness (a smoothed ratio) is the measure for every tribe size, with pass scored too."""
@@ -140,4 +185,5 @@ def test_tribe_characteristics_use_repness_with_a_significance_gate():
     # Pass is scored alongside agreement and disagreement rather than folded into either.
     assert "'pass': (mine_pass, rest_pass)" in source
     assert "above_floor = [item for item in candidates if item[\"ratio\"] >= TRIBE_CHARACTERISTIC_RATIO]" in source
-    assert "qualifying = [item for item in above_floor if item[\"z\"] > TRIBE_CHARACTERISTIC_Z]" in source
+    assert "\"significant\": best_z > TRIBE_CHARACTERISTIC_Z" in source
+    assert "qualifying = [item for item in above_floor if item[\"significant\"]]" in source

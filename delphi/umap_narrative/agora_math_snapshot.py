@@ -98,20 +98,22 @@ def resolve_agora_deliberation_id(
     return str(deliberation_id) if deliberation_id else None
 
 
-def fetch_agora_math_snapshot(
+def fetch_agora_report_inputs(
     deliberation_id: Optional[str],
     timeout: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Return the stored `math_pca2` payload for a deliberation, or None.
+    """Return the stored math and canonical group-consensus selections, or None.
 
     Args:
         deliberation_id: Agora deliberation id (NOT the numeric Pol.is zid).
         timeout: Optional request timeout in seconds.
 
     Returns:
-        The `math_pca2` dictionary exactly as Agora stores it, or None when the
-        snapshot is unavailable (missing config, 404, transport error, or a
-        malformed response). Never raises.
+        A dictionary containing Agora's `math_pca2` and, on current deployments,
+        `group_consensus_statements`, `group_division_statements` and
+        `uncertainty_statements`. Returns None when the snapshot is
+        unavailable (missing config, 404, transport error, or malformed
+        response). Never raises.
     """
     if not deliberation_id:
         return None
@@ -178,9 +180,35 @@ def fetch_agora_math_snapshot(
         )
         return None
 
+    selections = payload.get('group_consensus_statements') if isinstance(payload, dict) else None
+    if not isinstance(selections, dict):
+        selections = None
+
+    divisions = payload.get('group_division_statements') if isinstance(payload, dict) else None
+    if not isinstance(divisions, list):
+        divisions = None
+
+    uncertainty = payload.get('uncertainty_statements') if isinstance(payload, dict) else None
+    if not isinstance(uncertainty, list):
+        uncertainty = None
+
     logger.info(
         'Loaded stored Agora math snapshot for deliberation %s (math_tick=%s)',
         deliberation_id,
         math_pca2.get('math_tick'),
     )
-    return math_pca2
+    return {
+        'math_pca2': math_pca2,
+        'group_consensus_statements': selections,
+        'group_division_statements': divisions,
+        'uncertainty_statements': uncertainty,
+    }
+
+
+def fetch_agora_math_snapshot(
+    deliberation_id: Optional[str],
+    timeout: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return the stored `math_pca2` payload for compatibility with callers."""
+    report_inputs = fetch_agora_report_inputs(deliberation_id, timeout=timeout)
+    return report_inputs.get('math_pca2') if report_inputs else None

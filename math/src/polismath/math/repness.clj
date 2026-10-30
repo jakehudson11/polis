@@ -126,6 +126,54 @@
              (mapv comment-stats vote-cols-for-groups)
              (utils/mapv-rest add-comparitive-stats)))))})
 
+(defn group-characteristic-stats
+  "Return candidate-level agree/disagree repness and separate pass distinctiveness for every group/comment."
+  [data group-clusters base-clusters]
+  (let [{:keys [ids tids stats]} (conv-repness data group-clusters base-clusters)]
+    (into {}
+      (map-indexed
+        (fn [group-index gid]
+          [gid
+           (into {}
+             (map-indexed
+               (fn [tid-index tid]
+                 (let [group-stats (nth stats tid-index)
+                       {:keys [na nd ns pa pd pat pdt ra rd rat rdt]} (nth group-stats group-index)
+                       rest-stats (concat (subvec group-stats 0 group-index)
+                                          (subvec group-stats (inc group-index)))
+                       rest-agrees (pc/sum :na rest-stats)
+                       rest-disagrees (pc/sum :nd rest-stats)
+                       rest-shown (pc/sum :ns rest-stats)
+                       pass (- ns na nd)
+                       rest-pass (- rest-shown rest-agrees rest-disagrees)
+                       pass-repness (/ (/ (+ pass 1.0) (+ ns 2.0))
+                                       (/ (+ rest-pass 1.0) (+ rest-shown 2.0)))
+                       pass-repness-test (stats/two-prop-test pass rest-pass ns rest-shown)]
+                   [tid
+                    {:agree na
+                     :disagree nd
+                     :pass pass
+                     :shown ns
+                     :rest-agree rest-agrees
+                     :rest-disagree rest-disagrees
+                     :rest-pass rest-pass
+                     :rest-shown rest-shown
+                     :agree-repness ra
+                     :agree-repness-test rat
+                     :agree-share-test pat
+                     :agree-significant (and (stats/z-sig-90? rat)
+                                             (stats/z-sig-90? pat))
+                     :disagree-repness rd
+                     :disagree-repness-test rdt
+                     :disagree-share-test pdt
+                     :disagree-significant (and (stats/z-sig-90? rdt)
+                                                (stats/z-sig-90? pdt))
+                     :pass-repness pass-repness
+                     :pass-repness-test pass-repness-test
+                     :pass-significant (stats/z-sig-90? pass-repness-test)}]))
+               tids))])
+        ids))))
+
 
 (defn- beats-best-by-test?
   "Returns true if a given comment/group stat hash-map has a more representative z score than
@@ -411,4 +459,3 @@
 
 
 :ok
-

@@ -21,6 +21,9 @@
         <instruction>
             TRIBE TERMINOLOGY: Participant groups are called "Tribes". Each `&lt;tribe-N&gt;` element carries a `label` attribute ("Tribe 1", "Tribe 2"). Use that label. If you refer to element names, remember tribe-0 = Tribe 1, tribe-1 = Tribe 2, and so on. Never write "Group 0", "Group 1".
         </instruction>
+        <instruction>
+            CANONICAL AGORA SELECTION: When `uncertainty_statements_json` is supplied, it is the authoritative list of statements selected for the Agora results page's Points of Uncertainty card. Use exactly those statements, in the order shown. Do not independently filter, rank, replace, add, or drop statements. The pass percentage is total passes divided by everyone shown the statement, and the selection already required at least half of the group to be shown the statement and a pass rate of at least 20%.
+        </instruction>
     </criticalInstructions>
 
     <definitions>

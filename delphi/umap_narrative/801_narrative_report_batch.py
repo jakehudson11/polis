@@ -49,7 +49,7 @@ import traceback  # Added for detailed error tracing
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from umap_narrative.llm_factory_constructor import get_model_provider, AgoraProxyProvider
 from umap_narrative.llm_factory_constructor.model_provider import AnthropicProvider, AgoraProxyBatchClient, AgoraProxyStatusError, AgoraProxyTransportError, BatchNotCompleteError, agora_batch_configured
-from umap_narrative.agora_math_snapshot import fetch_agora_math_snapshot, resolve_agora_deliberation_id
+from umap_narrative.agora_math_snapshot import fetch_agora_report_inputs, resolve_agora_deliberation_id
 
 # Import from local modules
 from polismath_commentgraph.utils.storage import PostgresClient, DynamoDBStorage
@@ -81,6 +81,15 @@ MIN_POLARISATION_GAP = 0.25
 # Minimum overall pass rate for Points of Uncertainty. Keep this aligned with
 # UNCERTAINTY_PASS_RATE in the Agora frontend.
 UNCERTAINTY_PASS_RATE = 0.2
+
+# Sections whose statements Agora already selected for the Results page. Their order is preserved
+# and no independent ranking or threshold fallback is applied, so the narrative reports exactly
+# the statements the page shows.
+CANONICAL_SELECTION_FILTERS = frozenset({
+    'agora_selected_group_consensus',
+    'agora_selected_group_divisions',
+    'agora_selected_uncertainty',
+})
 
 
 def _as_number(value, default: float = 0.0) -> float:
@@ -264,6 +273,9 @@ class BatchReportGenerator:
         self.job_id = job_id or os.environ.get('DELPHI_JOB_ID')
         self.report_id = os.environ.get('DELPHI_REPORT_ID')
         self.deliberation_id = deliberation_id or os.environ.get('DELIBERATION_ID')
+        self.group_consensus_selection = None
+        self.group_division_selection = None
+        self.uncertainty_selection = None
         self.postgres_client = PostgresClient()
         self.include_moderation = include_moderation
 
@@ -316,7 +328,14 @@ class BatchReportGenerator:
             )
             return None
 
-        math_data = fetch_agora_math_snapshot(str(self.deliberation_id))
+        report_inputs = fetch_agora_report_inputs(str(self.deliberation_id))
+        if report_inputs:
+            self.group_consensus_selection = report_inputs.get('group_consensus_statements')
+            self.group_division_selection = report_inputs.get('group_division_statements')
+            self.uncertainty_selection = report_inputs.get('uncertainty_statements')
+            math_data = report_inputs.get('math_pca2')
+        else:
+            math_data = None
         if math_data:
             logger.info(
                 'Using stored Agora math snapshot for deliberation %s (math_tick=%s)',
@@ -324,6 +343,40 @@ class BatchReportGenerator:
                 math_data.get('math_tick'),
             )
         return math_data
+
+    def _canonical_group_division_tids(self):
+        """Statement ids Agora selected for the results page's Group Divisions card.
+
+        The page computes the pooled agree/disagree balance from the same math snapshot.
+        Re-selecting statements here would let the narrative describe a different set, so
+        the canonical list wins whenever Agora supplied one.
+        """
+        if not isinstance(self.group_division_selection, list):
+            return []
+        tids = []
+        for statement in self.group_division_selection:
+            if isinstance(statement, dict) and statement.get('tid') is not None:
+                tid = str(statement['tid'])
+                if tid not in tids:
+                    tids.append(tid)
+        return tids
+
+    def _canonical_uncertainty_tids(self):
+        """Statement ids Agora selected for the results page's Points of Uncertainty card.
+
+        The page applies a turnout floor and a 20% pass threshold to the same math snapshot.
+        Re-selecting statements here would let the narrative describe a different set, so the
+        canonical list wins whenever Agora supplied one.
+        """
+        if not isinstance(self.uncertainty_selection, list):
+            return []
+        tids = []
+        for statement in self.uncertainty_selection:
+            if isinstance(statement, dict) and statement.get('tid') is not None:
+                tid = str(statement['tid'])
+                if tid not in tids:
+                    tids.append(tid)
+        return tids
 
     def _get_math_main_data(self, conversation_id):
         """
@@ -707,11 +760,73 @@ class BatchReportGenerator:
                 raise ValueError("job_id is required for versioned topic keys but is missing or empty")
             
             global_topic_prefix = f"{self.job_id}_global"
+            group_division_tids = self._canonical_group_division_tids()
+            has_group_division_selection = isinstance(self.group_division_selection, list)
+            if has_group_division_selection:
+                groups_section = {
+                    "section_type": "global",
+                    "name": "groups",
+                    "topic_key": f"{global_topic_prefix}_groups",
+                    "filter_type": "agora_selected_group_divisions",
+                    "filter_threshold": MIN_POLARISATION_GAP,
+                    "selected_tids": group_division_tids,
+                    "group_division_statements": self.group_division_selection,
+                }
+            else:
+                groups_section = {
+                    "section_type": "global",
+                    "name": "groups",
+                    "topic_key": f"{global_topic_prefix}_groups",
+                    "filter_type": "cross_tribe_gap",
+                    "filter_threshold": MIN_POLARISATION_GAP,
+                }
+            uncertainty_tids = self._canonical_uncertainty_tids()
+            has_uncertainty_selection = isinstance(self.uncertainty_selection, list)
+            if has_uncertainty_selection:
+                uncertainty_section = {
+                    "section_type": "global",
+                    "name": "uncertainty",
+                    "topic_key": f"{global_topic_prefix}_uncertainty",
+                    "filter_type": "agora_selected_uncertainty",
+                    "filter_threshold": UNCERTAINTY_PASS_RATE,
+                    "selected_tids": uncertainty_tids,
+                    "uncertainty_statements": self.uncertainty_selection,
+                }
+            else:
+                uncertainty_section = {
+                    "section_type": "global",
+                    "name": "uncertainty",
+                    "topic_key": f"{global_topic_prefix}_uncertainty",
+                    "filter_type": "uncertainty_ratio",
+                    "filter_threshold": UNCERTAINTY_PASS_RATE,
+                }
             global_sections = [
-                {"section_type": "global", "name": "groups", "topic_key": f"{global_topic_prefix}_groups", "filter_type": "cross_tribe_gap", "filter_threshold": MIN_POLARISATION_GAP},
+                groups_section,
                 {"section_type": "global", "name": "group_informed_consensus", "topic_key": f"{global_topic_prefix}_group_informed_consensus", "filter_type": "group_aware_consensus", "filter_threshold": "dynamic"},
-                {"section_type": "global", "name": "uncertainty", "topic_key": f"{global_topic_prefix}_uncertainty", "filter_type": "uncertainty_ratio", "filter_threshold": UNCERTAINTY_PASS_RATE}
+                uncertainty_section,
             ]
+            if isinstance(self.group_consensus_selection, dict):
+                agreement = self.group_consensus_selection.get('agreement', [])
+                disagreement = self.group_consensus_selection.get('disagreement', [])
+                agreement = agreement if isinstance(agreement, list) else []
+                disagreement = disagreement if isinstance(disagreement, list) else []
+                selected_tids = []
+                for statement in agreement + disagreement:
+                    if isinstance(statement, dict) and statement.get('tid') is not None:
+                        tid = str(statement['tid'])
+                        if tid not in selected_tids:
+                            selected_tids.append(tid)
+                for section in global_sections:
+                    if section['name'] == 'group_informed_consensus':
+                        section['filter_type'] = 'agora_selected_group_consensus'
+                        section['selected_tids'] = selected_tids
+                        section['group_consensus_statements'] = {
+                            'groupCount': self.group_consensus_selection.get('groupCount'),
+                            'baseThreshold': self.group_consensus_selection.get('baseThreshold'),
+                            'smallSampleAdjusted': self.group_consensus_selection.get('smallSampleAdjusted'),
+                            'agreement': agreement,
+                            'disagreement': disagreement,
+                        }
             for section in global_sections: # Ensure placeholder keys exist
                 section.setdefault('citations', [])
                 section.setdefault('sample_comments', [])
@@ -728,15 +843,20 @@ class BatchReportGenerator:
             logger.error(f"A critical error occurred in get_topics: {str(e)}", exc_info=True)
             return []
         
-    def filter_topics(self, comment, topic_cluster_id=None, topic_layer_id=None, topic_citations=None, sample_comments=None, filter_type=None, filter_threshold=None):
+    def filter_topics(self, comment, topic_cluster_id=None, topic_layer_id=None, topic_citations=None, sample_comments=None, filter_type=None, filter_threshold=None, selected_tids=None):
         """Filter for comments that are part of a specific topic or meet global section criteria."""
         # Get comment ID
         comment_id = comment.get('comment_id')
-        if not comment_id:
+        if comment_id is None:
             return False
         
         # Handle global section filtering
         if filter_type is not None:
+            if filter_type in CANONICAL_SELECTION_FILTERS:
+                if not isinstance(selected_tids, (list, tuple, set)):
+                    return False
+                selected_ids = {str(tid) for tid in selected_tids}
+                return str(comment_id) in selected_ids
             return self._apply_global_filter(comment, filter_type, filter_threshold)
         
         # Handle layer-specific topic filtering (existing logic)
@@ -1214,10 +1334,10 @@ class BatchReportGenerator:
                             continue
         return sorted(group_ids)
 
-    def _select_comments_for_tribe_consensus(self, processed_comments: List[Dict[str, Any]], group_id: int, agree_threshold: float = 0.6, disagree_threshold: float = 0.6, limit: int = 50, tribe_size: int = 0) -> Dict[str, List[Dict[str, Any]]]:
+    def _select_comments_for_tribe_consensus(self, processed_comments: List[Dict[str, Any]], group_id: int, agree_threshold: float = 0.8, disagree_threshold: float = 0.8, limit: int = 50, tribe_size: int = 0) -> Dict[str, List[Dict[str, Any]]]:
         """Select comments with strong group agreement or disagreement.
 
-        Both directions use the same 60% bar so "strong" means the same thing whether the tribe
+        Both directions use the same 80% bar so "strong" means the same thing whether the tribe
         approved or rejected the statement. The rate is over everyone who saw the comment, so the
         payload also carries the raw counts; and a statement is skipped unless the tribe cast
         agree/disagree votes for at least MIN_TRIBE_TURNOUT of its participants, so one voter
@@ -1311,6 +1431,14 @@ class BatchReportGenerator:
             except (TypeError, ValueError):
                 return default
 
+        def _coerce_int(value):
+                if value is None or isinstance(value, bool):
+                    return None
+                try:
+                    return int(float(value))
+                except (TypeError, ValueError, OverflowError):
+                    return None
+
         def _group_ids(record: Dict[str, Any]) -> List[str]:
             ids = []
             for key in record.keys():
@@ -1335,65 +1463,147 @@ class BatchReportGenerator:
             )
 
         candidates = []
-        for c in processed_comments:
-            mine_votes = _coerce_float(c.get(f'group-{group_id}-votes', 0))
-            if mine_votes <= 0:
-                continue
-            mine_agrees = _coerce_float(c.get(f'group-{group_id}-agrees', 0))
-            mine_disagrees = _coerce_float(c.get(f'group-{group_id}-disagrees', 0))
-
-            cast = mine_agrees + mine_disagrees
-            denominator = tribe_size if tribe_size and tribe_size > 0 else mine_votes
-            if cast <= 0 or denominator <= 0 or (cast / denominator) < MIN_TRIBE_TURNOUT:
-                continue
-
-            rest_agrees = rest_disagrees = rest_votes = 0.0
-            for other_gid in _group_ids(c):
-                if other_gid == str(group_id):
-                    continue
-                rest_votes += _coerce_float(c.get(f'group-{other_gid}-votes', 0))
-                rest_agrees += _coerce_float(c.get(f'group-{other_gid}-agrees', 0))
-                rest_disagrees += _coerce_float(c.get(f'group-{other_gid}-disagrees', 0))
-            if rest_votes <= 0:
-                continue
-
-            mine_pass = max(0.0, mine_votes - mine_agrees - mine_disagrees)
-            rest_pass = max(0.0, rest_votes - rest_agrees - rest_disagrees)
-            counts = {
-                'agree': (mine_agrees, rest_agrees),
-                'disagree': (mine_disagrees, rest_disagrees),
-                'pass': (mine_pass, rest_pass),
+        has_canonical_metrics = (
+            isinstance(math_data, dict) and 'group-characteristics' in math_data
+        )
+        canonical_metrics = math_data.get('group-characteristics') if has_canonical_metrics else None
+        canonical_group = (
+            canonical_metrics.get(str(group_id), canonical_metrics.get(group_id))
+            if isinstance(canonical_metrics, dict) else None
+        )
+        if has_canonical_metrics:
+            if not isinstance(canonical_group, dict):
+                canonical_group = {}
+            comments_by_id = {
+                _coerce_int(c.get('comment_id', c.get('comment-id'))): c
+                for c in processed_comments
+                if _coerce_int(c.get('comment_id', c.get('comment-id'))) is not None
             }
+            for tid_key, metric in canonical_group.items():
+                tid = _coerce_int(tid_key)
+                if tid is None or not isinstance(metric, dict):
+                    continue
+                record = comments_by_id.get(tid)
+                if record is None:
+                    continue
 
-            best_kind = None
-            best_ratio = None
-            best_z = 0.0
-            for kind in ('agree', 'disagree', 'pass'):
-                successes, rest_successes = counts[kind]
-                ratio = _smoothed_ratio(successes, mine_votes, rest_successes, rest_votes)
-                if best_ratio is None or ratio > best_ratio:
-                    best_kind, best_ratio = kind, ratio
-                    best_z = _two_proportion_z(successes, mine_votes, rest_successes, rest_votes)
-            if best_kind is None:
-                continue
+                shown = _coerce_float(metric.get('shown'))
+                agrees = _coerce_float(metric.get('agree'))
+                disagrees = _coerce_float(metric.get('disagree'))
+                passes = _coerce_float(metric.get('pass'))
+                rest_agrees = _coerce_float(metric.get('rest-agree'))
+                rest_disagrees = _coerce_float(metric.get('rest-disagree'))
+                rest_passes = _coerce_float(metric.get('rest-pass'))
+                rest_shown = _coerce_float(metric.get('rest-shown'))
+                cast = agrees + disagrees
+                denominator = tribe_size if tribe_size and tribe_size > 0 else shown
+                if (
+                    shown <= 0 or rest_shown <= 0 or cast <= 0 or denominator <= 0
+                    or (cast / denominator) < MIN_TRIBE_TURNOUT
+                ):
+                    continue
 
-            candidates.append({
-                "record": c,
-                "kind": best_kind,
-                # Match the frontend's Math.round(... * 10000) / 10000 gate precision.
-                "ratio": math.floor(best_ratio * 10000 + 0.5) / 10000,
-                "z": best_z,
-                "tribe_agrees": mine_agrees,
-                "mine_disagrees": mine_disagrees,
-                "mine_votes": mine_votes,
-                "rest_agrees": rest_agrees,
-                "rest_votes": rest_votes,
-            })
+                dimensions = (
+                    ('agree', 'agree-repness', 'agree-repness-test', 'agree-significant', agrees),
+                    ('disagree', 'disagree-repness', 'disagree-repness-test', 'disagree-significant', disagrees),
+                    ('pass', 'pass-repness', 'pass-repness-test', 'pass-significant', passes),
+                )
+                best = None
+                for kind, ratio_key, test_key, significant_key, successes in dimensions:
+                    ratio = _coerce_float(metric.get(ratio_key), default=-1.0)
+                    test = _coerce_float(metric.get(test_key))
+                    if ratio < 0:
+                        continue
+                    if best is None or ratio > best['ratio']:
+                        best = {
+                            'kind': kind,
+                            'ratio': ratio,
+                            'z': test,
+                            'significant': metric.get(significant_key) is True,
+                            'successes': successes,
+                        }
+                if best is None:
+                    continue
+
+                candidates.append({
+                    "record": record,
+                    "kind": best["kind"],
+                    "ratio": math.floor(best["ratio"] * 10000 + 0.5) / 10000,
+                    "z": best["z"],
+                    "significant": best["significant"],
+                    "tribe_agrees": agrees,
+                    "mine_disagrees": disagrees,
+                    "tribe_pass": passes,
+                    "mine_votes": shown,
+                    "rest_agrees": rest_agrees,
+                    "rest_disagrees": rest_disagrees,
+                    "rest_pass": rest_passes,
+                    "rest_votes": rest_shown,
+                })
+        else:
+            for c in processed_comments:
+                mine_votes = _coerce_float(c.get(f'group-{group_id}-votes', 0))
+                if mine_votes <= 0:
+                    continue
+                mine_agrees = _coerce_float(c.get(f'group-{group_id}-agrees', 0))
+                mine_disagrees = _coerce_float(c.get(f'group-{group_id}-disagrees', 0))
+
+                cast = mine_agrees + mine_disagrees
+                denominator = tribe_size if tribe_size and tribe_size > 0 else mine_votes
+                if cast <= 0 or denominator <= 0 or (cast / denominator) < MIN_TRIBE_TURNOUT:
+                    continue
+
+                rest_agrees = rest_disagrees = rest_votes = 0.0
+                for other_gid in _group_ids(c):
+                    if other_gid == str(group_id):
+                        continue
+                    rest_votes += _coerce_float(c.get(f'group-{other_gid}-votes', 0))
+                    rest_agrees += _coerce_float(c.get(f'group-{other_gid}-agrees', 0))
+                    rest_disagrees += _coerce_float(c.get(f'group-{other_gid}-disagrees', 0))
+                if rest_votes <= 0:
+                    continue
+
+                mine_pass = max(0.0, mine_votes - mine_agrees - mine_disagrees)
+                rest_pass = max(0.0, rest_votes - rest_agrees - rest_disagrees)
+                counts = {
+                    'agree': (mine_agrees, rest_agrees),
+                    'disagree': (mine_disagrees, rest_disagrees),
+                    'pass': (mine_pass, rest_pass),
+                }
+
+                best_kind = None
+                best_ratio = None
+                best_z = 0.0
+                for kind in ('agree', 'disagree', 'pass'):
+                    successes, rest_successes = counts[kind]
+                    ratio = _smoothed_ratio(successes, mine_votes, rest_successes, rest_votes)
+                    if best_ratio is None or ratio > best_ratio:
+                        best_kind, best_ratio = kind, ratio
+                        best_z = _two_proportion_z(successes, mine_votes, rest_successes, rest_votes)
+                if best_kind is None:
+                    continue
+
+                candidates.append({
+                    "record": c,
+                    "kind": best_kind,
+                    # Match the frontend's Math.round(... * 10000) / 10000 gate precision.
+                    "ratio": math.floor(best_ratio * 10000 + 0.5) / 10000,
+                    "z": best_z,
+                    "significant": best_z > TRIBE_CHARACTERISTIC_Z,
+                    "tribe_agrees": mine_agrees,
+                    "mine_disagrees": mine_disagrees,
+                    "tribe_pass": mine_pass,
+                    "mine_votes": mine_votes,
+                    "rest_agrees": rest_agrees,
+                    "rest_disagrees": rest_disagrees,
+                    "rest_pass": rest_pass,
+                    "rest_votes": rest_votes,
+                })
 
         candidates.sort(key=lambda item: (-item["ratio"], item["record"].get('comment_id', 0)))
 
         above_floor = [item for item in candidates if item["ratio"] >= TRIBE_CHARACTERISTIC_RATIO]
-        qualifying = [item for item in above_floor if item["z"] > TRIBE_CHARACTERISTIC_Z]
+        qualifying = [item for item in above_floor if item["significant"]]
 
         if qualifying:
             selected = qualifying if limit is None else qualifying[:limit]
@@ -1418,8 +1628,10 @@ class BatchReportGenerator:
                 "overall_agree_rate": round(item["rest_agrees"] / item["rest_votes"], 4),
                 "tribe_agrees": int(item["tribe_agrees"]),
                 "tribe_disagrees": int(item["mine_disagrees"]),
+                "tribe_passes": int(item["tribe_pass"]),
                 "tribe_votes": int(item["mine_votes"]),
                 "overall_votes": int(item["rest_votes"]),
+                "overall_passes": int(item["rest_pass"]),
             })
         return results
 
@@ -1477,6 +1689,18 @@ class BatchReportGenerator:
                 "disagree_rate": round(tribe_disagree_rate, 4),
             },
         }
+
+        if payload_type in ('title', 'characteristics'):
+            consensus = self._select_comments_for_tribe_consensus(
+                processed_comments,
+                group_id,
+                limit=10,
+                tribe_size=participant_sizes.get(group_id, 0),
+            )
+            payload["consensus_context"] = {
+                "strong_agree_comments": consensus["strong_agree"],
+                "strong_disagree_comments": consensus["strong_disagree"],
+            }
 
         # Route by payload_type to select comments and build type-specific keys
         if payload_type == 'consensus':
@@ -1562,6 +1786,18 @@ class BatchReportGenerator:
                 else:
                     filtered_comments = [c for c in filtered_comments if filter_func(c)]
 
+            is_canonical_selection = (
+                filter_func == self.filter_topics
+                and isinstance(filter_args, dict)
+                and filter_args.get('filter_type') in CANONICAL_SELECTION_FILTERS
+            )
+            if is_canonical_selection:
+                selected_tids = filter_args.get('selected_tids', [])
+                filtered_comments = self.group_processor.select_comments_by_statement_ids(
+                    filtered_comments,
+                    selected_tids,
+                )
+
             # Global section fallback: if threshold filter yields zero comments,
             # pass through all comments and let high-quality selection/ranking handle prioritization.
             is_global_filter = (
@@ -1569,13 +1805,13 @@ class BatchReportGenerator:
                 and isinstance(filter_args, dict)
                 and filter_args.get('filter_type') is not None
             )
-            if is_global_filter and len(filtered_comments) == 0:
+            if is_global_filter and not is_canonical_selection and len(filtered_comments) == 0:
                 filter_type = filter_args.get('filter_type')
                 logger.warning(f"Global filter '{filter_type}' yielded 0 comments, falling back to top-K selection")
                 filtered_comments = data["processed_comments"]
             
             # Apply dynamic comment limiting with intelligent selection
-            if filter_func == self.filter_topics and len(filtered_comments) > 0:
+            if not is_canonical_selection and filter_func == self.filter_topics and len(filtered_comments) > 0:
                 # Get context for dynamic limit calculation
                 total_comment_count = len(data["processed_comments"])
                 
@@ -1614,7 +1850,7 @@ class BatchReportGenerator:
                         comment_limit, 
                         filter_type=filter_type
                     )
-                else:
+                elif not is_canonical_selection:
                     logger.info(f"No limiting needed: {len(filtered_comments)} comments <= limit of {comment_limit}")
             else:
                 # For non-topic filtering, use a conservative limit to avoid token issues
@@ -1641,13 +1877,85 @@ class BatchReportGenerator:
         if not conversation_data:
             logger.error("Failed to fetch conversation data. Cannot prepare batch requests.")
             return []
+
+        visible_tids = {
+            str(comment.get('comment_id', comment.get('comment-id')))
+            for comment in conversation_data.get('processed_comments', [])
+            if comment.get('comment_id', comment.get('comment-id')) is not None
+        }
+        if isinstance(self.group_consensus_selection, dict):
+            self.group_consensus_selection = {
+                **self.group_consensus_selection,
+                **{
+                    direction: [
+                        statement
+                        for statement in self.group_consensus_selection.get(direction, [])
+                        if isinstance(statement, dict)
+                        and str(statement.get('tid')) in visible_tids
+                    ]
+                    for direction in ('agreement', 'disagreement')
+                },
+            }
+
+        if isinstance(self.group_division_selection, list):
+            # A statement removed from the survey after the snapshot was captured no longer has
+            # text, so it cannot be cited. Keep the canonical (possibly empty) list: an empty list
+            # means the page shows no Group Divisions card, so the narrative must not fall back to an
+            # independent filter and describe statements the page cannot show.
+            self.group_division_selection = [
+                statement
+                for statement in self.group_division_selection
+                if isinstance(statement, dict)
+                and str(statement.get('tid')) in visible_tids
+            ]
+
+        if isinstance(self.uncertainty_selection, list):
+            # Same rule for the Points of Uncertainty narrative.
+            self.uncertainty_selection = [
+                statement
+                for statement in self.uncertainty_selection
+                if isinstance(statement, dict)
+                and str(statement.get('tid')) in visible_tids
+            ]
         
         topics = await self.get_topics()
+        if not isinstance(self.group_consensus_selection, dict):
+            topics = [
+                topic for topic in topics
+                if topic.get('name') != 'group_informed_consensus'
+            ]
+            logger.warning(
+                "Skipping the Group Consensus narrative because Agora's canonical "
+                "statement selections are unavailable; Delphi will not independently select replacements"
+            )
+        elif not (
+            self.group_consensus_selection.get('agreement')
+            or self.group_consensus_selection.get('disagreement')
+        ):
+            # The results page renders no Group Consensus card when both lists are empty, so there
+            # is no matching narrative to write.
+            topics = [
+                topic for topic in topics
+                if topic.get('name') != 'group_informed_consensus'
+            ]
+            logger.info('Skipping Group Consensus narrative: Agora selected no statements')
+
+        if isinstance(self.group_division_selection, list) and not self.group_division_selection:
+            # The page shows no Group Divisions card, so do not schedule a narrative about a different set.
+            topics = [topic for topic in topics if topic.get('name') != 'groups']
+            logger.info('Skipping Group Divisions narrative: Agora selected no statements')
+
+        if isinstance(self.uncertainty_selection, list) and not self.uncertainty_selection:
+            # The page shows no Points of Uncertainty card, so do not schedule a narrative about a
+            # different set.
+            topics = [topic for topic in topics if topic.get('name') != 'uncertainty']
+            logger.info('Skipping Points of Uncertainty narrative: Agora selected no statements')
 
         # --- Add participant-group tribe sections ---
-        # Tribe Consensus was deliberately removed from the results page, so new jobs schedule
-        # only the title and characteristics sections. Legacy consensus sections remain supported
-        # by the normalizer and prompt for old reports.
+        # Tribe Consensus has no standalone narrative on the results page: Tribe Insights already
+        # carries tribe consensus as secondary context. New jobs schedule only the title and
+        # characteristics sections; legacy consensus sections remain in old snapshots but are
+        # ignored by the results view.
         group_ids = self._get_participant_group_ids(conversation_data)
         logger.info(f"Detected {len(group_ids)} participant groups for tribe sections: {group_ids}")
         for gid in group_ids:
@@ -1727,8 +2035,10 @@ class BatchReportGenerator:
                 # Create filter args for global section
                 filter_args = {
                     'filter_type': filter_type,
-                    'filter_threshold': filter_threshold
+                    'filter_threshold': filter_threshold,
                 }
+                if filter_type in CANONICAL_SELECTION_FILTERS:
+                    filter_args['selected_tids'] = topic.get('selected_tids', [])
                 
                 logger.info(f"Global section mapping - name: {topic_name}, filter_type: {filter_type}, "
                            f"filter_threshold: {filter_threshold}, topic_key: {topic_key}")
@@ -1792,7 +2102,11 @@ class BatchReportGenerator:
                 logger.info(f"DEBUG: Topic 0 has content: {bool(structured_comments and structured_comments.strip())}")
             
             # Skip if no structured comments
-            if not structured_comments.strip():
+            is_empty_canonical_consensus = (
+                is_global_section
+                and filter_type == 'agora_selected_group_consensus'
+            )
+            if not structured_comments.strip() and not is_empty_canonical_consensus:
                 logger.warning(f"No content after filter for topic {topic_name} (cluster_id={topic_cluster_id})")
                 continue
             
@@ -1852,20 +2166,50 @@ class BatchReportGenerator:
                 data_payload = {"structured_comments": structured_comments}
                 if is_global_section:
                     total_comments = len(conversation_data["processed_comments"])
+                    is_canonical_topic = topic.get('filter_type') in CANONICAL_SELECTION_FILTERS
                     filter_descriptions = {
                         "cross_tribe_gap": "statements where the tribes disagree most (largest gap between the most and least agreeing tribe)",
                         "comment_extremity": "the most distinctive statements (high extremity)",
                         "group_aware_consensus": "comments with high cross-tribe consensus",
+                        "agora_selected_group_consensus": "the exact agreement and disagreement statements selected for the Agora results page",
+                        "agora_selected_group_divisions": "the exact statements Agora's Group Divisions card selected for the results page",
+                        "agora_selected_uncertainty": "the exact statements Agora's Points of Uncertainty card selected for the results page",
                         "uncertainty_ratio": "comments with high uncertainty/pass rates",
                     }
                     data_payload["conversation_context"] = (
-                        f"IMPORTANT: This section analyzes a SUBSET of the full conversation. "
-                        f"The conversation contains {total_comments} total comments. "
-                        f"Only {filtered_count} comments are shown here because they met the filter criteria: "
-                        f"{filter_descriptions.get(topic.get('filter_type'), 'filtered comments')}. "
-                        f"Do NOT make claims about 'all comments' or 'the entire conversation' — "
-                        f"you are only seeing the {filtered_count} comments that passed this specific filter."
+                        (
+                            f"The conversation contains {total_comments} total comments. "
+                            f"This section uses exactly the {filtered_count} canonical statements selected "
+                            "for the Agora results page. Do not add or substitute statements."
+                        )
+                        if is_canonical_topic
+                        else (
+                            f"IMPORTANT: This section analyzes a SUBSET of the full conversation. "
+                            f"The conversation contains {total_comments} total comments. "
+                            f"Only {filtered_count} comments are shown here because they met the filter criteria: "
+                            f"{filter_descriptions.get(topic.get('filter_type'), 'filtered comments')}. "
+                            f"Do NOT make claims about 'all comments' or 'the entire conversation' — "
+                            f"you are only seeing the {filtered_count} comments that passed this specific filter."
+                        )
                     )
+                    if topic.get('filter_type') == 'agora_selected_group_consensus':
+                        data_payload["group_consensus_statements_json"] = json.dumps(
+                            topic.get('group_consensus_statements', {}),
+                            ensure_ascii=False,
+                            default=lambda o: float(o) if isinstance(o, __import__('decimal').Decimal) else str(o)
+                        )
+                    if topic.get('filter_type') == 'agora_selected_group_divisions':
+                        data_payload["group_division_statements_json"] = json.dumps(
+                            {"statements": topic.get('group_division_statements') or []},
+                            ensure_ascii=False,
+                            default=lambda o: float(o) if isinstance(o, __import__('decimal').Decimal) else str(o)
+                        )
+                    if topic.get('filter_type') == 'agora_selected_uncertainty':
+                        data_payload["uncertainty_statements_json"] = json.dumps(
+                            {"statements": topic.get('uncertainty_statements') or []},
+                            ensure_ascii=False,
+                            default=lambda o: float(o) if isinstance(o, __import__('decimal').Decimal) else str(o)
+                        )
                 if tribe_payload is not None:
                     # Provide extra context for tribe templates without changing the existing request flow.
                     # Keep JSON blobs as strings to avoid xmltodict structural quirks.

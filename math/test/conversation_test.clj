@@ -4,6 +4,7 @@
   (:require [clojure.test :refer :all]
             [polismath.math.conversation :as conversation]
             [polismath.math.named-matrix :as named-matrix]
+            [polismath.math.repness :as repness]
             [clojure.tools.trace :as tr]))
 
 
@@ -113,7 +114,42 @@
           (is (= (get-count :g2 :c1 :A) 1)))
         (testing "aggrees"
           (is (= (get-count :g1 :c1 :D) 0))
-          (is (= (get-count :g2 :c1 :D) 2))))))
+          (is (= (get-count :g2 :c1 :D) 2)))))
+
+    (deftest group-characteristic-stats-test
+      (let [characteristics (repness/group-characteristic-stats
+                              (:rating-mat conv)
+                              group-clusters
+                              base-clusters)
+            tribe-one-c1 (get-in characteristics [:g1 :c1])
+            tribe-two-c1 (get-in characteristics [:g2 :c1])]
+        (testing "includes explicit pass counts and separate pass distinctiveness"
+          (is (= 1 (:pass tribe-one-c1)))
+          (is (= 2 (:shown tribe-one-c1)))
+          (is (= 2.5 (:pass-repness tribe-one-c1)))
+          (is (number? (:pass-repness-test tribe-one-c1))))
+        (testing "preserves Polis agree/disagree repness and significance statistics"
+          (is (= 1 (:agree tribe-one-c1)))
+          (is (= 2 (:disagree tribe-two-c1)))
+          (is (number? (:agree-repness tribe-one-c1)))
+          (is (number? (:disagree-repness tribe-one-c1)))
+          (is (boolean? (:agree-significant tribe-one-c1)))
+          (is (boolean? (:disagree-significant tribe-one-c1)))))))
+
+  (deftest group-aware-vote-score-test
+    (let [group-votes
+          {:g1 {:votes {:supported {:A 3 :D 0 :S 4}
+                        :rejected {:A 0 :D 3 :S 4}}}
+           :g2 {:votes {:supported {:A 1 :D 2 :S 3}
+                        :rejected {:A 3 :D 0 :S 4}}}}
+          agree (conversation/group-aware-vote-score group-votes :A)
+          disagree (conversation/group-aware-vote-score group-votes :D)]
+      (testing "agreement multiplies the Laplace-smoothed agree share across groups"
+        (is (< (Math/abs (- (agree :supported) (* (/ 4.0 6) (/ 2.0 5)))) 1e-10)))
+      (testing "disagreement is the symmetric product over the same shown counts"
+        (is (< (Math/abs (- (disagree :supported) (* (/ 1.0 6) (/ 3.0 5)))) 1e-10)))
+      (testing "swapping agree and disagree swaps the directional scores"
+        (is (< (Math/abs (- (agree :rejected) (disagree :rejected))) 1e-10)))))
 
 
   ; Test that iterating on previous pca/clustering results makes sense
@@ -169,6 +205,4 @@
 
 (defn -main []
   (run-tests 'conversation-test))
-
-
 

@@ -42,6 +42,29 @@ def select(comments, group_id, tribe_size, limit=None):
     )
 
 
+def select_consensus(comments, group_id, tribe_size):
+    return BatchReportGenerator._select_comments_for_tribe_consensus(
+        None,
+        comments,
+        group_id,
+        tribe_size=tribe_size,
+    )
+
+
+def test_tribe_consensus_uses_eighty_percent_of_recorded_votes():
+    comments = [
+        comment(1, (8, 0, 10), (2, 1, 3)),
+        comment(2, (7, 0, 10), (2, 1, 3)),
+        comment(3, (0, 8, 10), (2, 1, 3)),
+        comment(4, (0, 7, 10), (2, 1, 3)),
+    ]
+
+    selected = select_consensus(comments, 0, 10)
+
+    assert [entry['comment_id'] for entry in selected['strong_agree']] == [1]
+    assert [entry['comment_id'] for entry in selected['strong_disagree']] == [3]
+
+
 def test_repness_and_significance_choose_the_winning_direction():
     comments = [comment(1, (5, 0, 5), (0, 3, 3))]
 
@@ -65,6 +88,107 @@ def test_pass_is_its_own_characteristic():
     assert tribe1[0]['comment_id'] == 7
     assert tribe1[0]['repful_for'] == 'pass'
     assert tribe1[0]['significant'] is True
+
+
+def test_uses_polis_candidate_metrics_and_includes_pass_counts():
+    comments = [comment(8, (5, 5, 20), (10, 10, 20))]
+    math_data = {
+        'group-characteristics': {
+            '0': {
+                '8': {
+                    'agree': 5,
+                    'disagree': 5,
+                    'pass': 10,
+                    'shown': 20,
+                    'rest-agree': 10,
+                    'rest-disagree': 10,
+                    'rest-pass': 0,
+                    'rest-shown': 20,
+                    'agree-repness': 0.55,
+                    'agree-repness-test': 0.4,
+                    'agree-significant': False,
+                    'disagree-repness': 0.55,
+                    'disagree-repness-test': 0.4,
+                    'disagree-significant': False,
+                    'pass-repness': 11,
+                    'pass-repness-test': 3.3,
+                    'pass-significant': True,
+                }
+            }
+        }
+    }
+
+    selected = BatchReportGenerator._select_comments_for_tribe_characteristics(
+        None,
+        comments,
+        0,
+        limit=None,
+        math_data=math_data,
+        tribe_size=20,
+    )
+
+    assert len(selected) == 1
+    assert selected[0]['comment_id'] == 8
+    assert selected[0]['repful_for'] == 'pass'
+    assert selected[0]['repness'] == 11
+    assert selected[0]['significant'] is True
+    assert selected[0]['tribe_passes'] == 10
+    assert selected[0]['overall_passes'] == 0
+
+
+def test_uses_polis_significance_flags_instead_of_retesting():
+    comments = [comment(9, (8, 2, 10), (2, 8, 10))]
+    math_data = {
+        'group-characteristics': {
+            '0': {
+                '9': {
+                    'agree': 8,
+                    'disagree': 2,
+                    'pass': 0,
+                    'shown': 10,
+                    'rest-agree': 2,
+                    'rest-disagree': 8,
+                    'rest-pass': 0,
+                    'rest-shown': 10,
+                    'agree-repness': 2,
+                    'agree-repness-test': 9,
+                    'agree-significant': False,
+                    'disagree-repness': 0.25,
+                    'disagree-repness-test': -9,
+                    'disagree-significant': False,
+                    'pass-repness': 1,
+                    'pass-repness-test': 0,
+                    'pass-significant': False,
+                }
+            }
+        }
+    }
+
+    selected = BatchReportGenerator._select_comments_for_tribe_characteristics(
+        None,
+        comments,
+        0,
+        math_data=math_data,
+        tribe_size=10,
+    )
+
+    assert len(selected) == 1
+    assert selected[0]['repful_for'] == 'agree'
+    assert selected[0]['significant'] is False
+
+
+def test_does_not_recalculate_when_canonical_metrics_omit_a_group():
+    comments = [comment(10, (5, 0, 5), (0, 3, 3))]
+
+    selected = BatchReportGenerator._select_comments_for_tribe_characteristics(
+        None,
+        comments,
+        0,
+        math_data={'group-characteristics': {'1': {}}},
+        tribe_size=5,
+    )
+
+    assert selected == []
 
 
 def test_turnout_below_half_is_excluded():
@@ -153,3 +277,9 @@ def test_title_and_characteristics_payloads_share_the_full_statement_set():
 
     assert title_tids == [1, 2]
     assert characteristics_tids == title_tids
+    expected_consensus_ids = [1, 2]
+    assert [
+        entry['comment_id']
+        for entry in title_payload['consensus_context']['strong_agree_comments']
+    ] == expected_consensus_ids
+    assert title_payload['consensus_context'] == characteristics_payload['consensus_context']

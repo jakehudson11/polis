@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <polisAnalysisPrompt version="1.0">
     <metadata>
-        <title>Guide to Analyzing and Reporting Tribes in Pol.is Conversations</title>
-        <purpose>Generate consistent, evidence-based reports comparing tribes and describing the key
-            differences between them</purpose>
+        <title>Guide to Reporting Group Divisions</title>
+        <purpose>Describe the issues on which the whole group split most evenly between agreeing and
+            disagreeing, using the statements Agora selected for the Group Divisions card</purpose>
     </metadata>
 
     <criticalInstructions>
@@ -16,109 +16,128 @@
             the response with ```, your response MUST begin with { and end with }
         </instruction>
         <instruction>
-            WRITE ABOUT THE FINDINGS, NOT THE METHOD: start directly with the substantive difference between the tribes. Never mention filtering, subsets, thresholds, ranks, comment counts, sample sizes, pass rates, or the analysis process. Never open with "Analysis of..." or refer to "filtered comments". Base every claim on the statements provided and do not invent statements that are not shown.
+            WRITE ABOUT THE FINDINGS, NOT THE METHOD: start directly with the substantive issue the
+            group is divided on. Never mention filtering, subsets, thresholds, ranks, comment counts,
+            sample sizes, balance scores, pass rates, or the analysis process. Never open with
+            "Analysis of..." or refer to "filtered comments". Base every claim on the statements
+            provided and do not invent statements that are not shown.
         </instruction>
         <instruction>
-            TRIBE TERMINOLOGY: Participant groups are called "Tribes". Each `&lt;tribe-N&gt;` element carries a `label` attribute ("Tribe 1", "Tribe 2"). Use that label. If you refer to element names, remember tribe-0 = Tribe 1, tribe-1 = Tribe 2, and so on. Never write "Group 0", "Group 1".
+            CANONICAL STATEMENTS: when `group_division_statements_json` is present, it lists exactly
+            the statements this section reports on. Do not add, drop, re-rank, or substitute
+            statements.
         </instruction>
         <instruction>
-            CRITICAL DATA VERIFICATION: Before writing ANY claim about how a tribe voted on a statement, check the per-tribe agrees/disagrees counts.
-            - If disagrees > agrees, the tribe rejects the statement; if agrees > disagrees, the tribe supports it.
-            - If agrees and disagrees are equal, or passes dominate, describe the tribe as split or uncertain — do not assign a clear position.
-            - NEVER reverse a tribe's position, and never claim a statement divided tribes if all tribes show similar voting patterns.
-            - Your narrative must be fully grounded in the actual numbers.
+            MIXED VIEWS, NOT TRIBE CHARACTERISTICS: this section is about the group as a whole. Each
+            statement here has an approximately even pooled agree/disagree split. Describe what the
+            group as a whole is divided about. Do not turn the section into a list of how each tribe
+            differs — that belongs to the tribe sections.
+        </instruction>
+        <instruction>
+            DO NOT INVENT CAMPS: a balanced split means the group is divided overall. It does not
+            prove two opposing camps exist. Only describe a tribe as leaning a particular way when
+            the statement's per-tribe counts are visible in the data and clearly support it. If
+            tribes lean the same way, or the per-tribe counts are absent, describe the division as
+            running through the group rather than between tribes.
+        </instruction>
+        <instruction>
+            TURNOUT AND PASSES: never claim a statement represents the whole group's view when the
+            data shows a large pass count. Passes mean many participants did not take a side; you may
+            note that a division is concentrated among those who voted, but do not invent reasons for
+            the passes.
+        </instruction>
+        <instruction>
+            CRITICAL DATA VERIFICATION: Before writing ANY claim about a direction of opinion, check
+            the agree/disagree counts for that statement. If disagrees > agrees, the group leaned
+            against it; if agrees > disagrees, the group leaned towards it; if they are close, describe
+            the group as split. NEVER reverse a position.
         </instruction>
     </criticalInstructions>
 
     <definitions>
-        <term name="group_differences">
-            <description>Notable difference in views between tribes, especially comments where tribes
-                disagreed significantly</description>
+        <term name="mixed_view">
+            <description>A statement on which the group's agree and disagree votes are close to
+                even when pooled across all participants</description>
         </term>
-        <term name="extreme_differences">
-            <description>Very large difference in views between tribes (typically where one
-                tribe strongly agrees and another strongly disagrees)</description>
+        <term name="group_division">
+            <description>A substantive issue where the participant group is split rather than
+                uniformly for or against</description>
+        </term>
+        <term name="balanced_split">
+            <description>An even division that may run between tribes, within tribes, or both; the
+                pooled counts alone do not distinguish these</description>
         </term>
     </definitions>
 
     <analysisProcess>
         <dataProcessing>
             <step order="1">
-                <n>Identify Key Tribe Differences</n>
+                <n>Identify the Substance of Each Division</n>
                 <calculations>
-                    <calculation>between_group_differences</calculation>
-                    <calculation>agreement_rate_differences</calculation>
-                    <calculation>most_divisive_statements</calculation>
+                    <calculation>pooled_agree_disagree_split</calculation>
+                    <calculation>direction_of_majority</calculation>
+                    <calculation>relative_balance</calculation>
                 </calculations>
             </step>
             <step order="2">
-                <n>Analyze Tribe Characteristics</n>
+                <n>Explain What the Division Is About</n>
                 <calculations>
-                    <calculation>group_positional_clustering</calculation>
-                    <calculation>group_value_inference</calculation>
-                    <pattern>group_distinctive_positions</pattern>
+                    <calculation>underlying_issue</calculation>
+                    <calculation>competing_considerations</calculation>
+                    <pattern>shared_concern_with_different_conclusions</pattern>
                 </calculations>
             </step>
             <step order="3">
-                <n>Synthesize Tribe Narratives</n>
+                <n>Synthesize the Division Narrative</n>
                 <analyses>
-                    <analysis>core_values_by_group</analysis>
-                    <analysis>key_divisions_explanation</analysis>
-                    <pattern>narrative_tensions</pattern>
+                    <analysis>key_mixed_view_themes</analysis>
+                    <analysis>where_the_group_leans</analysis>
+                    <analysis>what_remains_unresolved</analysis>
                 </analyses>
             </step>
         </dataProcessing>
 
         <reportingStructure>
-            <paragraph type="group_overview">
+            <paragraph type="division_overview">
                 <elements>
-                    <element>number_of_groups</element>
-                    <element>key_divisions</element>
+                    <element>key_mixed_view_themes</element>
+                    <element>direction_of_the_group</element>
                     <element>defining_statements</element>
                 </elements>
                 <criticalInstructions>
                     <instruction>
-                        Focus on the full set of tribes, not just pairs of tribes. Describe the
-                        constellation of views across all tribes.
+                        Open with the issues that most divide the group, not with the number of
+                        statements or the size of any score.
                     </instruction>
                     <instruction>
-                        Use specific statements to illustrate tribe positions, but do so in service
-                        of showing broader patterns rather than isolated points.
+                        Use specific statements to show what the division is about. Where the group
+                        leans towards one side, say so; where it is evenly split, describe the
+                        competing considerations.
                     </instruction>
                     <instruction>
-                        Avoid generic descriptions. Instead, characterize each tribe by their
-                        distinctive positions and apparent priorities or values.
+                        Group related statements into themes so the section reads as a few
+                        substantive disagreements rather than a list.
                     </instruction>
                 </criticalInstructions>
                 <format>
-                    The conversation contains [number_of_groups] distinct tribes with different
-                    perspectives on key issues. These tribes were primarily defined by their
-                    positions on [key_division_theme], particularly regarding [specific_aspect].
-                    [Additional_high_level_context].
+                    The group is most divided on [theme], where participants split over
+                    [the_competing_considerations]. Support for [position] reflected [concern],
+                    while opposition centred on [different_concern]. [Additional_insight].
 
-                    The most significant divisions between tribes emerged around
-                    [major_division_topic], with [description_of_key_disagreement]. This reflected
-                    deeper differences in [values/priorities/concerns], especially in discussions of
-                    [related_subtopic]. [Additional_insight_if_relevant].
-
-                    [If extreme polarization exists] Particularly stark contrasts appeared in
-                    positions on [polarizing_topic], where Tribes [X] and [Y] took
-                    [diametrically_opposed_positions] on [specific_statements]. This division
-                    highlighted fundamental differences in [underlying_values_or_frameworks].
+                    [Additional_theme_if_relevant]. [Description_of_how_the_group_leans_or_remains_split].
                 </format>
                 <paragraphInstructions>
                     <instruction>
                         Provide a comprehensive overview that:
-                        - Introduces all identified tribes
-                        - Highlights major lines of division
-                        - Connects specific differences to broader themes
-                        - Avoids overemphasizing any single statement or division
+                        - Names the substantive issues the group split on
+                        - Explains what each side of the division is protecting or prioritising
+                        - Notes where the group leans overall and where it is evenly divided
+                        - Avoids overemphasising any single statement
                         - Provides multiple specific examples with appropriate citations
                     </instruction>
                 </paragraphInstructions>
                 <length>3-5 paragraphs</length>
             </paragraph>
-
         </reportingStructure>
 
         <citationRules>
@@ -134,83 +153,82 @@
 
         <validationRequirements>
             <dataQuality>
-                <requirement>minimum_votes_per_cited_statement>25</requirement>
+                <requirement>only_cite_statements_in_this_section</requirement>
             </dataQuality>
-
             <reportingCompleteness>
-                <requirement>all_groups_represented>true</requirement>
+                <requirement>all_cited_statements_reflected_in_themes>true</requirement>
                 <requirement>patterns_explained>true</requirement>
-                <requirement>special_cases_noted>true</requirement>
+                <requirement>no_unsupported_camp_claims>true</requirement>
             </reportingCompleteness>
         </validationRequirements>
 
         <specialCases>
-            <case type="hybrid_group">
-                <description>Tribe that shares positions with different tribes on different
-                    issues</description>
+            <case type="one_sided_within_tribes">
+                <description>A balanced pooled split that comes from an even split inside each tribe,
+                    with no tribe clearly on one side</description>
                 <handling>
-                    <action>identify_cross_cutting_positions</action>
-                    <action>explain_unique_combination</action>
-                    <action>avoid_simplistic_classification</action>
+                    <action>describe_as_division_running_through_the_group</action>
+                    <action>avoid_claiming_opposing_camps</action>
                 </handling>
             </case>
-            <case type="internal_division">
-                <description>Tribe that is internally divided on specific issues</description>
+            <case type="opposing_tribes">
+                <description>Per-tribe counts show tribes on opposite sides of a statement</description>
                 <handling>
-                    <action>note_internal_disagreement</action>
-                    <action>identify_unifying_factors</action>
-                    <action>explain_pattern_significance</action>
+                    <action>describe_the_contrast_between_tribes</action>
+                    <action>keep_the_focus_on_the_substantive_issue</action>
+                </handling>
+            </case>
+            <case type="high_pass">
+                <description>Many participants passed on a statement rather than taking a side</description>
+                <handling>
+                    <action>scope_claims_to_those_who_voted</action>
+                    <action>avoid_inferring_motives_for_passing</action>
                 </handling>
             </case>
         </specialCases>
 
         <languageGuidelines>
             <groupTerms>
-                <term>perspective</term>
+                <term>the group</term>
+                <term>participants</term>
                 <term>position</term>
-                <term>stance</term>
-                <term>view</term>
-                <term>approach</term>
-                <term>priority</term>
-                <term>emphasis</term>
-                <term>value</term>
                 <term>concern</term>
+                <term>priority</term>
+                <term>trade-off</term>
             </groupTerms>
-
             <styleRules>
                 <rule>avoid_repetitive_structures</rule>
-                <rule>connect_group_descriptions_to_broader_narrative</rule>
+                <rule>connect_each_division_to_the_broader_narrative</rule>
                 <rule>maintain_neutral_tone</rule>
-                <rule>use_precise_language_for_degrees_of_agreement</rule>
+                <rule>use_precise_language_for_degrees_of_division</rule>
             </styleRules>
         </languageGuidelines>
 
         <qualityChecklist>
-            <check>all_groups_covered_comprehensively</check>
-            <check>claims_supported_by_multiple_examples</check>
+            <check>divisions_explained_by_substance_not_score</check>
+            <check>claims_supported_by_provided_statements</check>
             <check>citation_rules_followed</check>
-            <check>patterns_properly_identified</check>
-            <check>special_cases_noted</check>
-            <check>between_group_connections_explained</check>
+            <check>no_unsupported_claims_of_opposing_camps</check>
+            <check>group_level_focus_maintained</check>
             <check>language_varied_and_clear</check>
         </qualityChecklist>
     </analysisProcess>
 
     <validationRules>
-        <rule>All tribe characterizations must be based on multiple statements from data</rule>
+        <rule>All claims must be based on statements in this section</rule>
         <rule>Each claim requires at least one citation</rule>
         <rule>Citations must use provided format</rule>
-        <rule>Tribes must be referenced by actual tribe identifiers from data</rule>
+        <rule>Never claim a tribe's position without per-tribe counts that support it</rule>
     </validationRules>
 
     <responseFormat>
         <condensedJSONSchema>
             {
             "id": "group_differences",
-            "title": "Tribe Differences",
+            "title": "Group Divisions",
             "paragraphs": [
             {
-            "id": "string", // e.g. "group_overview"
+            "id": "string", // e.g. "division_overview"
             "title": "string",
             "sentences": [
             {
@@ -243,7 +261,7 @@
             };
 
             type Paragraph = {
-            id: string; // e.g. "group_overview"
+            id: string; // e.g. "division_overview"
             title: string;
             sentences: Sentence[];
             };
@@ -258,17 +276,19 @@
     <example>
         {
         "id": "group_differences",
-        "title": "Tribe Differences",
+        "title": "Group Divisions",
         "paragraphs": [
         {
-        "id": "group_overview",
-        "title": "Overview of Tribe Differences",
+        "id": "division_overview",
+        "title": "Overview of Group Divisions",
         "sentences": [
         {
         "clauses": [
         {
-        "text": "The conversation contains 3 distinct tribes with different perspectives on key issues.",
+        "text": "The group is most divided on how quickly the new policy should be introduced.",
         "citations": [12, 15, 23]
+        }
+        ]
         }
         ]
         }

@@ -39,6 +39,7 @@ export type PcaCacheItem = {
       }
     >;
     "group-aware-consensus"?: Record<string, number>;
+    "group-aware-disagreement"?: Record<string, number>;
     "user-vote-counts": Record<string, number>;
     "in-conv": number[];
     "n-cmts": number;
@@ -186,6 +187,7 @@ async function createEmptyPcaStructure(
     },
     "group-votes": {},
     "group-aware-consensus": {},
+    "group-aware-disagreement": {},
     "user-vote-counts": {},
     "in-conv": [],
     "n-cmts": nCmts,
@@ -276,6 +278,13 @@ async function ensureCompletePcaStructure(
   ) {
     mergedData["group-aware-consensus"] =
       emptyStructure["group-aware-consensus"];
+  }
+  if (
+    !mergedData["group-aware-disagreement"] ||
+    typeof mergedData["group-aware-disagreement"] !== "object"
+  ) {
+    mergedData["group-aware-disagreement"] =
+      emptyStructure["group-aware-disagreement"];
   }
   if (
     !mergedData["user-vote-counts"] ||

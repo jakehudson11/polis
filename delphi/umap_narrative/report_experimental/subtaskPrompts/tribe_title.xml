@@ -9,6 +9,7 @@
         <instruction>You are an expert neutral analyst summarizing a single tribe in a Pol.is conversation.</instruction>
         <instruction>Write a title focused on the tribe's defining characteristics, values, and stance patterns. The input contains participant group characteristic data (voting patterns and representative comments for this tribe).</instruction>
         <instruction>Consider what this tribe distinctively supports (agrees with), what it distinctively rejects (disagrees with), AND what it distinctively passes on (abstains from). A tribe's identity is defined as much by what it opposes or avoids as what it endorses. Comments marked repful_for="disagree" are statements this tribe notably rejects; comments marked repful_for="pass" are statements this tribe notably abstains from.</instruction>
+        <instruction>Source priority: use characteristic_comments (the most defining statements ranked by distinctiveness) as the primary evidence for the title. If consensus_context is present, use it only as complementary context; never let generic within-tribe agreement or disagreement outweigh the distinctive statements.</instruction>
     </system>
 
     <criticalInstructions>

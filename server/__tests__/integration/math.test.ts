@@ -31,6 +31,7 @@ interface PCAResponse {
   "base-clusters": any;
   "comment-priorities": any;
   "group-aware-consensus": any;
+  "group-aware-disagreement": any;
   "group-clusters": any;
   "group-votes": any;
   "in-conv": any;
@@ -170,6 +171,7 @@ describe("Math and Analysis Endpoints", () => {
       expect(pcaResponse["base-clusters"]).toBeDefined();
       expect(pcaResponse["comment-priorities"]).toBeDefined();
       expect(pcaResponse["group-aware-consensus"]).toBeDefined();
+      expect(pcaResponse["group-aware-disagreement"]).toBeDefined();
       expect(pcaResponse["group-clusters"]).toBeDefined();
       expect(pcaResponse["group-votes"]).toBeDefined();
       expect(pcaResponse["in-conv"]).toBeDefined();
@@ -295,6 +297,7 @@ describe("Math and Analysis Endpoints", () => {
     expect(body["group-clusters"]).toEqual([]);
     expect(body["group-votes"]).toEqual({});
     expect(body["group-aware-consensus"]).toEqual({});
+    expect(body["group-aware-disagreement"]).toEqual({});
     expect(body["user-vote-counts"]).toEqual({});
     expect(body["in-conv"]).toEqual([]);
     expect(body["votes-base"]).toEqual({});

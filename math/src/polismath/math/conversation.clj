@@ -304,6 +304,27 @@
                        (keys votes-base))}]))
         group-clusters))))
 
+(defn group-aware-vote-score
+  "Multiply the smoothed share of one vote direction across all groups, keyed by statement id."
+  [group-votes vote-key]
+  (let [per-tid
+        (reduce
+          (fn [result [gid group-stats]]
+            (reduce
+              (fn [result [tid {:keys [S] :as votes}]]
+                (let [count (get votes vote-key 0)
+                      probability (/ (+ count 1.0) (+ S 2.0))]
+                  (assoc-in result [tid gid] probability)))
+              result
+              (:votes group-stats)))
+          {}
+          group-votes)]
+    (into {}
+      (map
+        (fn [[tid group-probabilities]]
+          [tid (reduce * (vals group-probabilities))])
+        per-tid))))
+
 
 (defn importance-metric
   [A P S E]
@@ -611,29 +632,15 @@
                  (group-votes subgroup-clusters' base-clusters votes-base)))))
 
 
-      ; {tid consensus}
+      ; {tid consensus}; +1 acts as a dumb prior.
       :group-aware-consensus
-           (plmb/fnk [group-votes]
-             (let [tid-gid-probs
-                   (reduce
-                     (fn [result [gid gid-stats]]
-                       (reduce
-                         (fn [result [tid {:keys [A S] :or {A 0 S 0}}]]
-                           (let [prob (/ (+ A 1.0) (+ S 2.0))]
-                             (assoc-in result [tid gid] prob)))
-                         result
-                         (:votes gid-stats)))
-                       ;; +1 acts as a dumb prior
-                     {}
-                     group-votes)
-                   tid-consensus
-                   (plmb/map-vals
-                     (fn [tid-stats]
-                       (->> tid-stats
-                            (map second)
-                            (reduce *)))
-                     tid-gid-probs)]
-               tid-consensus))
+      (plmb/fnk [group-votes]
+        (group-aware-vote-score group-votes :A))
+
+      ; The symmetric score for cross-group disagreement.
+      :group-aware-disagreement
+      (plmb/fnk [group-votes]
+        (group-aware-vote-score group-votes :D))
 
       :comment-priorities
       (plmb/fnk [conv group-votes pca tids meta-tids]
@@ -674,6 +681,9 @@
       (plmb/fnk [conv rating-mat group-clusters base-clusters]
         (-> (repness/conv-repness rating-mat group-clusters base-clusters)
             (repness/select-rep-comments (:mod-out conv))))
+      :group-characteristics
+      (plmb/fnk [rating-mat group-clusters base-clusters]
+        (repness/group-characteristic-stats rating-mat group-clusters base-clusters))
       :subgroup-repness
       (plmb/fnk [conv rating-mat subgroup-clusters base-clusters]
         (->> subgroup-clusters
@@ -924,4 +934,3 @@
 
 
 :ok
-

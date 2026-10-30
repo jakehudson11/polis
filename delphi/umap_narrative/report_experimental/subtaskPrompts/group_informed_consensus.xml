@@ -24,18 +24,22 @@
             - Your narrative MUST be consistent with the actual numbers. Every claim about support or opposition must match the vote data.
         </instruction>
         <instruction>
+            CANONICAL AGORA SELECTION: When `group_consensus_statements_json` is supplied, it is the authoritative list of statements selected for the Agora results page. Its `agreement` and `disagreement` arrays are the exact statements shown in the corresponding results sections; do not independently filter, rank, replace, or add statements. The XML contains the union of those statements. Use each array's direction and score together with the per-tribe vote counts in the XML. If the selection is empty, do not infer or substitute other statements.
+        </instruction>
+        <instruction>
+            If both canonical arrays are empty, state briefly that no statements met the cross-tribe agreement or disagreement criteria. Do not describe the result as a lack of common ground and do not infer additional statements from the conversation.
+        </instruction>
+        <instruction>
             WRITE ABOUT THE FINDINGS, NOT THE METHOD: start directly with the common ground the tribes share. Never mention filtering, subsets, thresholds, counts, sample sizes, or the analysis process. Never open with "Analysis of..." or refer to "filtered comments". Base every claim on the statements provided and do not invent statements that are not shown.
         </instruction>
         <instruction>
             TRIBE TERMINOLOGY: Participant groups are called "Tribes". Each `&lt;tribe-N&gt;` element carries a `label` attribute ("Tribe 1", "Tribe 2"). Use that label. If you refer to element names, remember tribe-0 = Tribe 1, tribe-1 = Tribe 2, and so on. Never write "Group 0", "Group 1".
         </instruction>
         <instruction>
-            CRITICAL — DISAGREE CONSENSUS: "Consensus" means all groups voted THE SAME WAY, whether that is agree OR disagree.
-            - If a comment has HIGH DISAGREES and ZERO/LOW AGREES across ALL groups, that IS consensus — it is consensus to REJECT that statement.
-            - NEVER describe unanimous cross-group disagreement as "absence of consensus", "failure to find common ground", or "lack of agreement".
-            - When all groups reject a statement together, report it as "disagree consensus" or "consensus to reject" — this is shared ground, not division.
-            - Distinguish between "agree consensus" (all groups support a statement) and "disagree consensus" (all groups reject a statement). Both are valid forms of cross-tribe consensus.
-            - Example: If comment has agrees=0, disagrees=5, and every group shows 0 agrees and all disagrees, that is STRONG consensus (shared rejection). Report it as such.
+            DIRECTIONAL GROUP CONSENSUS: A statement can qualify without unanimity. Agora selects agreement and disagreement separately using the product of Laplace-smoothed per-tribe shares for that direction, with the supplied threshold. Passes are included in shown and lower both directional scores. Describe the actual degree of support or rejection shown in each tribe's vote counts; do not imply unanimity unless the counts establish it.
+        </instruction>
+        <instruction>
+            CRITICAL — DISAGREE CONSENSUS: A statement in the canonical `disagreement` array qualifies on the cross-tribe group-aware disagreement score and represents shared rejection. NEVER describe it as "absence of consensus", "failure to find common ground", or "lack of agreement". Distinguish shared rejection from division, while accurately describing any minority support shown in the vote counts.
         </instruction>
     </criticalInstructions>
 
@@ -53,18 +57,19 @@
             <unit>consensus_score</unit>
         </term>
         <term name="disagree_consensus">
-            <description>Comments where all groups unanimously DISAGREE — high disagrees and zero/low agrees across every group. This is a valid form of consensus (shared rejection) and must NOT be described as absence of consensus. The group-aware-consensus metric scores this highly because all groups voted the same direction.</description>
+            <description>Comments with a high smoothed product of per-group disagree rates. This is a directional mirror of group-aware agreement and represents shared rejection, not an absence of common ground.</description>
             <threshold>Same thresholds as group_informed_consensus</threshold>
-            <unit>consensus_score (0-1)</unit>
+            <unit>group_aware_disagreement_score (0-1)</unit>
         </term>
     </definitions>
 
     <analysisProcess>
         <dataProcessing>
             <step order="1">
-                <n>Identify Comments with Cross-Tribe Consensus</n>
+                <n>Interpret the Canonical Directional Consensus Statements</n>
                 <calculations>
                     <calculation>group_aware_consensus_score</calculation>
+                    <calculation>group_aware_disagreement_score</calculation>
                     <calculation>agreement_across_groups</calculation>
                     <calculation>outlier_consensus_items</calculation>
                 </calculations>
@@ -208,7 +213,6 @@
 
         <validationRequirements>
             <dataQuality>
-                <requirement>minimum_votes_per_cited_statement>25</requirement>
                 <requirement>minimum_consensus_score>variable_by_group_count</requirement>
             </dataQuality>
 
@@ -238,10 +242,10 @@
                 </handling>
             </case>
             <case type="disagree_consensus">
-                <description>Comments where agrees=0 (or near-zero) and disagrees are high across ALL groups. All groups unanimously reject the statement.</description>
+                <description>Comments selected by Agora's group-aware disagreement score because their smoothed per-group disagreement rates jointly meet the applicable threshold.</description>
                 <handling>
                     <action>report_as_consensus_to_reject — this IS cross-tribe consensus, not its absence</action>
-                    <action>describe_as_shared_rejection — all groups found common ground in rejecting this statement</action>
+                    <action>describe_as_shared_rejection — tribes jointly show a strong tendency to reject this statement</action>
                     <action>analyze_what_the_rejection_reveals — shared rejection of an idea can illuminate shared values just as much as shared support</action>
                     <action>NEVER describe as "absence of consensus" or "failure to agree" or "no common ground"</action>
                 </handling>
@@ -261,7 +265,6 @@
                 <term>unified position</term>
                 <term>shared rejection</term>
                 <term>consensus to reject</term>
-                <term>unanimous dismissal</term>
                 <term>collective opposition</term>
             </consensusTerms>
 
@@ -285,12 +288,12 @@
     </analysisProcess>
 
     <validationRules>
-        <rule>All claims about consensus must be based on agreement data across tribes</rule>
+        <rule>All claims about consensus must be based on the canonical agreement/disagreement arrays and the per-tribe vote data</rule>
         <rule>Each claim requires at least one citation</rule>
         <rule>Citations must use provided format</rule>
         <rule>Multiple consensus areas must be identified and analyzed</rule>
-        <rule>Before stating any comment failed to achieve consensus, verify its agrees vs disagrees in the data. A comment with majority agrees in all groups IS achieving consensus.</rule>
-        <rule>A comment with zero agrees but high disagrees in ALL groups IS achieving consensus (disagree consensus). Never report it as lack of consensus.</rule>
+        <rule>Do not require unanimity: use the directional score and threshold supplied in the canonical arrays, then accurately describe the actual vote distribution.</rule>
+        <rule>For every statement in the disagreement array, describe shared rejection without claiming unanimity unless its vote counts establish it.</rule>
         <rule>If the data contains only a few comments, report what the data actually shows rather than generating generic patterns. Do not project expected patterns onto the data.</rule>
     </validationRules>
 

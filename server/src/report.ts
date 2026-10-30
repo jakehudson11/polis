@@ -650,6 +650,9 @@ export async function sendCommentGroupsSummary(
     number,
     number
   >;
+  const groupAwareDisagreement = pca.asPOJO[
+    "group-aware-disagreement"
+  ] as Record<number, number> | undefined;
 
   const commentExtremity =
     (pca.asPOJO["pca"]?.["comment-extremity"] as Array<number>) || [];
@@ -740,18 +743,19 @@ export async function sendCommentGroupsSummary(
     );
   }
 
-  // Compute group-aware consensus for DISAGREE (mirrors the Clojure agree computation)
+  // Keep old math snapshots usable while preferring the score computed by Polis math.
   const groupAwareConsensusDisagree: Record<number, number> = {};
   for (const tid of commentStats.keys()) {
-    let score = 1.0;
-    for (const gid of groupIds) {
-      const votes = groupVotes[gid]?.votes?.[tid];
-      const D = votes?.D ?? 0;
-      const S = votes?.S ?? 0;
-      const prob = (D + 1.0) / (S + 2.0);
-      score *= prob;
+    const storedScore = groupAwareDisagreement?.[tid];
+    if (typeof storedScore === "number" && Number.isFinite(storedScore)) {
+      groupAwareConsensusDisagree[tid] = storedScore;
+      continue;
     }
-    groupAwareConsensusDisagree[tid] = score;
+
+    groupAwareConsensusDisagree[tid] = groupIds.reduce((score, gid) => {
+      const votes = groupVotes[gid]?.votes?.[tid];
+      return score * ((votes?.D ?? 0) + 1.0) / ((votes?.S ?? 0) + 2.0);
+    }, 1.0);
   }
 
   // Format and send CSV

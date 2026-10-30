@@ -24,7 +24,7 @@
             Your output MUST be valid JSON. Do not use comments or trailing commas in the JSON.
         </instruction>
         <instruction>
-            SUBSET AWARENESS: You are analyzing a SUBSET of the conversation — only comments where this tribe shows strong agreement (≥60%) or strong disagreement (≥60%). The full conversation contains more comments than shown here. Check the conversation_context field in the data section for exact counts. Do NOT claim patterns like "all comments showed X" or "the entire conversation" — you are only seeing filtered high-signal comments.
+            SUBSET AWARENESS: You are analyzing a SUBSET of the conversation — only comments where this tribe shows strong agreement (≥80%) or strong disagreement (≥80%). The full conversation contains more comments than shown here. Check the conversation_context field in the data section for exact counts. Do NOT claim patterns like "all comments showed X" or "the entire conversation" — you are only seeing filtered high-signal comments.
         </instruction>
         <instruction>
             TRIBE TERMINOLOGY: Participant groups are called "Tribes". Always write "Tribe 1", "Tribe 2", etc. (1-indexed). Never write "Group 0", "Group 1". The data uses zero-indexed group IDs — add 1 when writing tribe names: group 0 = Tribe 1, group 1 = Tribe 2, and so on.
@@ -55,13 +55,13 @@
             <description>A single cluster of participants with similar voting patterns within the conversation. Tribes map 1:1 to participant groups (voter clusters).</description>
         </term>
         <term name="strong_agreement">
-            <description>Comments where this tribe has an agreement rate of 60% or higher, indicating widespread internal consensus in favor</description>
-            <threshold>60</threshold>
+            <description>Comments where this tribe has an agreement rate of 80% or higher, indicating widespread internal consensus in favor</description>
+            <threshold>80</threshold>
             <unit>percent</unit>
         </term>
         <term name="strong_disagreement">
-            <description>Comments where this tribe has a disagreement rate of 60% or higher, indicating widespread internal consensus against</description>
-            <threshold>60</threshold>
+            <description>Comments where this tribe has a disagreement rate of 80% or higher, indicating widespread internal consensus against</description>
+            <threshold>80</threshold>
             <unit>percent</unit>
         </term>
     </definitions>
